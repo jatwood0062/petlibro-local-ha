@@ -1,0 +1,28 @@
+feed:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: petlibro_lan
+    portions:
+      required: true
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 12
+          mode: box
+
+set_feeding_plan:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: petlibro_lan
+    plans:
+      required: true
+      example: '[{"time": "07:30", "portions": 2}, {"time": "18:00", "portions": 2, "days": [1, 2, 3, 4, 5]}]'
+      selector:
+        object:

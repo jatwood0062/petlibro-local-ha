@@ -1,0 +1,86 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "PetLibro Local",
+        "description": "This starts a local MQTT broker on port {port} that PetLibro feeders and fountains connect to instead of the PetLibro cloud.\n\nBefore devices can find it, rewrite the DNS name `{hostname}` to this Home Assistant host's IP address in your DNS server (AdGuard Home, Pi-hole or your router). Blocking the devices' internet access is also recommended. Home Assistant must not already have an MQTT broker listening on port {port}."
+      }
+    },
+    "error": {
+      "port_in_use": "Port 1883 is already in use on this host. Stop the other MQTT broker (for example the Mosquitto add-on) or run it on another port."
+    },
+    "abort": {
+      "single_instance_allowed": "PetLibro Local is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PetLibro Local options",
+        "description": "Devices always dial `{hostname}` on port 1883, so change this only if you forward that port to Home Assistant.",
+        "data": {
+          "port": "Broker port"
+        }
+      }
+    },
+    "error": {
+      "port_in_use": "That port is already in use on this host."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connectivity": {"name": "Connected"},
+      "food_low": {"name": "Food low"},
+      "dispenser_blocked": {"name": "Dispenser blocked"},
+      "water_low": {"name": "Water low"}
+    },
+    "button": {
+      "feed_now": {"name": "Feed now"},
+      "reset_filter": {"name": "Reset filter"},
+      "zero_scale": {"name": "Zero scale"}
+    },
+    "number": {
+      "feed_portions": {"name": "Portions for feed now"}
+    },
+    "sensor": {
+      "battery": {"name": "Battery"},
+      "power_source": {
+        "name": "Power source",
+        "state": {"battery": "Battery", "mains": "Mains", "unknown": "Unknown"}
+      },
+      "rssi": {"name": "Wi-Fi signal"},
+      "last_feed_time": {"name": "Last feed"},
+      "last_feed_portions": {"name": "Last feed portions"},
+      "feeds_today": {"name": "Feeds today"},
+      "feeding_plan": {"name": "Feeding plan"},
+      "water_weight": {"name": "Water weight"},
+      "water_level": {"name": "Water level"},
+      "filter_days": {"name": "Filter remaining"},
+      "ip_address": {"name": "IP address"}
+    },
+    "switch": {
+      "indicator_light": {"name": "Indicator light"},
+      "button_lock": {"name": "Button lock"},
+      "pump": {"name": "Pump"},
+      "light": {"name": "Light"}
+    }
+  },
+  "services": {
+    "feed": {
+      "name": "Feed",
+      "description": "Dispenses portions now.",
+      "fields": {
+        "device_id": {"name": "Feeder", "description": "The feeder to use."},
+        "portions": {"name": "Portions", "description": "Number of portions (1-12 on the Granary, 1-5 on the One RFID)."}
+      }
+    },
+    "set_feeding_plan": {
+      "name": "Set feeding plan",
+      "description": "Replaces the feeder's schedule. Times are in the Home Assistant time zone and are converted to UTC for the device. An empty list clears the schedule on the device.",
+      "fields": {
+        "device_id": {"name": "Feeder", "description": "The feeder to use."},
+        "plans": {"name": "Plans", "description": "List of entries with time (HH:MM), portions and optional days (1 = Monday to 7 = Sunday; default every day)."}
+      }
+    }
+  }
+}
