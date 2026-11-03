@@ -214,3 +214,7 @@ def test_state_heartbeat_drift():
     st = state.DeviceState("AF01ABC123", "PLAF103")
     st.ingest("heart", {"cmd": "HEARTBEAT", "rssi": -60, "ts": NOW - 555_000}, NOW, date(2026, 1, 1))
     assert st.data["clock_drift_s"] == -555 and "device_ts" not in st.data
+
+
+def test_non_finite_numbers_are_ignored():
+    assert protocol.parse_attrs({"electricQuantity": float("inf"), "currentWeight": float("nan")}) == {}

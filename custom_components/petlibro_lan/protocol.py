@@ -6,6 +6,7 @@ and listen on ``sub``. Messages are JSON with ``cmd``, ``ts`` (ms), ``msgId`` an
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -229,7 +230,9 @@ def _bool(value: Any) -> bool | None:
 
 
 def _num(value: Any) -> float | int | None:
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value
 
 
 _BOOLS = {

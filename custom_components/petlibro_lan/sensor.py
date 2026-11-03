@@ -16,6 +16,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .entity import FEEDER, FOUNTAIN, PetlibroEntity, setup_entities
 
@@ -72,14 +73,15 @@ class PetlibroSensor(PetlibroEntity, SensorEntity):
 
 
 class FeedsToday(PetlibroEntity, SensorEntity):
-    _attr_state_class = SensorStateClass.TOTAL
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
 
     def __init__(self, hub, serial) -> None:
         super().__init__(hub, serial, "feeds_today")
 
     @property
     def native_value(self) -> int:
-        return self.hub.devices[self.serial].feeds_today
+        dev = self.hub.devices[self.serial]
+        return dev.feeds_today if dev.feeds_day == dt_util.now().date() else 0
 
 
 class FeedingPlan(PetlibroEntity, SensorEntity):

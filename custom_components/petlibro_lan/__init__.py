@@ -10,8 +10,9 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, SERVICE_FEED, SERVICE_SET_PLAN
+from .const import DOMAIN, SERVICE_FEED, SERVICE_SET_PLAN, STORE_VERSION
 from .hub import PetlibroHub
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ PLAN_SCHEMA = vol.Schema({
     vol.Required("plans"): [PLAN_ENTRY],
 })
 
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 PetlibroConfigEntry = ConfigEntry  # runtime_data is a PetlibroHub
 
 
@@ -71,13 +73,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: PetlibroConfigEntry) -> 
     except ConnectionError as err:
         raise ConfigEntryNotReady(str(err)) from err
     entry.runtime_data = hub
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        await hub.async_stop()
+        raise
     entry.async_on_unload(entry.add_update_listener(_reload))
     return True
 
 
 async def _reload(hass: HomeAssistant, entry: PetlibroConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: PetlibroConfigEntry) -> None:
+    await Store(hass, STORE_VERSION, DOMAIN).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PetlibroConfigEntry) -> bool:

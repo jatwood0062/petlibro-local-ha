@@ -30,6 +30,7 @@ from .const import (
     POLL_INTERVAL,
     SIGNAL_NEW_DEVICE,
     SIGNAL_UPDATE,
+    STORE_VERSION,
 )
 from .models import FEEDER, ModelInfo, model_info
 from .state import DeviceState
@@ -37,6 +38,11 @@ from .state import DeviceState
 _LOGGER = logging.getLogger(__name__)
 RAW_LOG_LIMIT = 600
 SAVE_DELAY = 5
+
+
+def _mask(serial: str) -> str:
+    """Serials are not logged in full above debug level."""
+    return f"...{serial[-4:]}"
 
 
 class PetlibroHub:
@@ -50,7 +56,7 @@ class PetlibroHub:
         self.devices: dict[str, DeviceState] = {}
         self.plans: dict[str, list[dict[str, Any]]] = {}  # only devices with a user-configured plan
         self.feed_portions: dict[str, int] = {}
-        self._store: Store = Store(hass, 1, DOMAIN)
+        self._store: Store = Store(hass, STORE_VERSION, DOMAIN)
         self._online: set[str] = set()
         self._pending: dict[str, asyncio.Future] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -71,7 +77,13 @@ class PetlibroHub:
         for serial, item in (saved.get("devices") or {}).items():
             if isinstance(item, dict) and isinstance(item.get("model"), str):
                 self.devices[serial] = DeviceState(serial, item["model"])
-        self.plans = {s: p for s, p in (saved.get("plans") or {}).items() if s in self.devices}
+        self.plans = {}
+        for serial, stored in (saved.get("plans") or {}).items():
+            if serial in self.devices and (info := self.info(serial)).max_portions:
+                try:
+                    self.plans[serial] = planlib.normalize(stored, info.max_portions)
+                except ValueError:
+                    _LOGGER.warning("Ignoring invalid stored feeding plan for %s", _mask(serial))
         try:
             await self.broker.start()
         except OSError as err:
@@ -109,7 +121,7 @@ class PetlibroHub:
 
     # --- broker callbacks ---
     def _on_connect(self, serial: str, ip: str) -> None:
-        _LOGGER.info("PetLibro device %s connected from %s", serial, ip)
+        _LOGGER.debug("PetLibro device %s connected from %s", serial, ip)
         self._ips[serial] = ip
         if (dev := self.devices.get(serial)) is not None:
             dev.ip = ip
@@ -117,6 +129,9 @@ class PetlibroHub:
 
     def _on_disconnect(self, serial: str) -> None:
         _LOGGER.debug("PetLibro device %s disconnected", serial)
+        if serial in self._online:
+            self._online.discard(serial)
+            self._signal(serial)
 
     def _on_publish(self, serial: str, topic: str, payload: bytes) -> None:
         _LOGGER.debug("RX %s: %s", topic, payload[:RAW_LOG_LIMIT])
@@ -129,11 +144,11 @@ class PetlibroHub:
         dev = self.devices.get(serial)
         if dev is None:
             if model_info(parsed.model, serial) is None:
-                _LOGGER.warning("Ignoring unknown PetLibro device %s (model %s)", serial, parsed.model)
+                _LOGGER.warning("Ignoring unknown PetLibro device %s (model %s)", _mask(serial), parsed.model)
                 return
             dev = self.devices[serial] = DeviceState(serial, parsed.model)
             dev.ip = self._ips.get(serial)
-            _LOGGER.info("New PetLibro device %s (%s)", serial, parsed.model)
+            _LOGGER.info("New PetLibro device %s (%s)", _mask(serial), parsed.model)
             self._save()
             async_dispatcher_send(self.hass, SIGNAL_NEW_DEVICE, serial)
         elif dev.model != parsed.model:
@@ -146,10 +161,9 @@ class PetlibroHub:
         now = protocol.now_ms()
         local_today = dt_util.now().date()
         if "linkId" not in msg:
+            dev.ingest(parsed.channel, msg, now, local_today)  # also the ATTR_GET_SERVICE replies
             if parsed.channel == "service":
                 self._resolve(msg)
-            else:
-                dev.ingest(parsed.channel, msg, now, local_today)
         wire = self._wire_plan(serial)
         for channel, reply in protocol.respond(parsed.channel, msg, now, self.tz, wire):
             self._send_raw(dev, channel, reply)
@@ -159,7 +173,8 @@ class PetlibroHub:
         self._signal(serial)
 
     def _resolve(self, msg: dict[str, Any]) -> None:
-        fut = self._pending.get(msg.get("msgId"))
+        msg_id = msg.get("msgId")
+        fut = self._pending.get(msg_id) if isinstance(msg_id, str) else None
         if fut is not None and not fut.done():
             fut.set_result(msg)
 
@@ -174,21 +189,21 @@ class PetlibroHub:
         """Send a command and wait for the device's reply; raises HomeAssistantError on failure."""
         dev = self.devices[serial]
         if serial not in self._online or not self.broker.is_connected(serial):
-            raise HomeAssistantError(f"{serial} is not connected")
+            raise HomeAssistantError(f"{_mask(serial)} is not connected")
         loop = asyncio.get_running_loop()
         fut = self._pending[msg["msgId"]] = loop.create_future()
         try:
             topic = protocol.build_topic(dev.model, serial, "service")
             if not await self.broker.publish(serial, topic, protocol.encode(msg)):
-                raise HomeAssistantError(f"{serial} is not listening for commands")
+                raise HomeAssistantError(f"{_mask(serial)} is not listening for commands")
             try:
                 reply = await asyncio.wait_for(fut, COMMAND_TIMEOUT)
             except (asyncio.TimeoutError, TimeoutError) as err:
-                raise HomeAssistantError(f"{serial} did not answer {msg['cmd']}") from err
+                raise HomeAssistantError(f"{_mask(serial)} did not answer {msg['cmd']}") from err
         finally:
             self._pending.pop(msg["msgId"], None)
         if reply.get("code", 0) != 0:
-            raise HomeAssistantError(f"{serial} rejected {msg['cmd']} (code {reply.get('code')})")
+            raise HomeAssistantError(f"{_mask(serial)} rejected {msg['cmd']} (code {reply.get('code')})")
         return reply
 
     async def async_set_attrs(self, serial: str, msg: dict[str, Any], expect: dict[str, Any]) -> None:
@@ -238,12 +253,12 @@ class PetlibroHub:
         try:
             await self.async_command(serial, protocol.set_feeding_plan(wire))
         except HomeAssistantError as err:
-            _LOGGER.warning("Feeding plan for %s not confirmed yet: %s", serial, err)
+            _LOGGER.warning("Feeding plan for %s not confirmed yet: %s", _mask(serial), err)
             return
         self._plan_sig[serial] = planlib.signature(wire)
         self._plan_synced[serial] = time.monotonic()
         self._plan_tries[serial] = 0
-        _LOGGER.info("Feeding plan sent to %s (%d entries)", serial, len(wire))
+        _LOGGER.info("Feeding plan sent to %s (%d entries)", _mask(serial), len(wire))
 
     def next_feed(self, serial: str) -> tuple[datetime, int] | None:
         stored = self.plans.get(serial)

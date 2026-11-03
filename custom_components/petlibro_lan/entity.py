@@ -46,6 +46,7 @@ class PetlibroEntity(Entity):
         return self.hub.is_online(self.serial)
 
     async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
         self.async_on_remove(async_dispatcher_connect(
             self.hass, SIGNAL_UPDATE.format(self.serial), self.async_write_ha_state))
 

@@ -384,3 +384,14 @@ def test_topic_matches():
     assert m("a/+/c", "a/x/c") and not m("a/+/c", "a/x/y/c")
     assert m("a/#", "a/b/c")
     assert m("a/b/#", "a/b/c/d")
+
+
+def test_stop_with_connected_client_does_not_hang():
+    async def go():
+        b = broker.Broker(lambda *a: None, host="127.0.0.1", port=0, peer_ok=lambda ip: True)
+        await b.start()
+        c = await Client.open(b.port)
+        await c.handshake()
+        await asyncio.wait_for(b.stop(), 7)
+        assert not b.clients and await c.closed()
+    run(go())

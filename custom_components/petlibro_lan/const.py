@@ -3,6 +3,7 @@ from __future__ import annotations
 
 DOMAIN = "petlibro_lan"
 NAME = "PetLibro Local"
+STORE_VERSION = 1
 CLOUD_HOST = "mqtt.us.petlibro.com"
 
 CONF_PORT = "port"

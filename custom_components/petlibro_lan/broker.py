@@ -213,13 +213,17 @@ class Broker:
         _LOGGER.debug("MQTT broker listening on %s:%s", self.host, self.port)
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        server, self._server = self._server, None
+        if server is not None:
+            server.close()
         for conn in list(self._conns.values()):
             conn.close()
         self._conns.clear()
+        if server is not None:
+            try:  # Python 3.12+ waits for open connections here, so they are closed first
+                await asyncio.wait_for(server.wait_closed(), 5)
+            except (asyncio.TimeoutError, TimeoutError):
+                _LOGGER.debug("Timed out waiting for the broker to close")
 
     def is_connected(self, client_id: str) -> bool:
         return client_id in self._conns
