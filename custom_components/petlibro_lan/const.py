@@ -23,3 +23,11 @@ SIGNAL_UPDATE = f"{DOMAIN}_update_{{}}"
 
 SERVICE_FEED = "feed"
 SERVICE_SET_PLAN = "set_feeding_plan"
+
+SIGNAL_ANY = f"{DOMAIN}_any_update"  # any device changed (the app listens to this)
+ALERT_EVENT = f"{DOMAIN}_alert"
+ALERT_TICK = 60  # seconds between alert evaluations without a device update
+ALERT_STORE_KEY = f"{DOMAIN}.alerts"
+PANEL_URL_PATH = "petlibro-local"
+PANEL_ELEMENT = "petlibro-local-panel"
+FRONTEND_URL = "/petlibro_lan_frontend"

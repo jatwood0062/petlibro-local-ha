@@ -10,11 +10,13 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from . import alerts as alertlib
 from . import plans as planlib
 from . import protocol
 from .broker import Broker
@@ -29,12 +31,15 @@ from .const import (
     PLAN_RESYNC,
     PLAN_RETRY,
     POLL_INTERVAL,
+    FILTER_LIFE_DAYS,
+    SIGNAL_ANY,
     SIGNAL_NEW_DEVICE,
     SIGNAL_UPDATE,
     STORE_VERSION,
 )
 from .hosts import parse_forward
-from .models import FEEDER, ModelInfo, model_info
+from .models import FEEDER, FOUNTAIN, ModelInfo, model_info
+from .notifier import AlertManager
 from .state import DeviceState
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,6 +75,8 @@ class PetlibroHub:
         self._last_poll: dict[str, float] = {}
         self._ips: dict[str, str] = {}
         self._unsub_tick = None
+        self.started_ts = time.time()
+        self.alerts = AlertManager(hass, self)
 
     @property
     def tz(self):
@@ -91,11 +98,14 @@ class PetlibroHub:
             await self.broker.start()
         except OSError as err:
             raise ConnectionError(f"cannot listen on port {self.broker.port}: {err}") from err
+        await self.alerts.async_load()
         self._unsub_tick = async_track_time_interval(self.hass, self._tick, timedelta(seconds=30))
+        self.alerts.start()
 
     async def async_stop(self) -> None:
         if self._unsub_tick:
             self._unsub_tick()
+        await self.alerts.async_stop()
         await self.broker.stop()
         for task in list(self._tasks):
             task.cancel()
@@ -114,6 +124,9 @@ class PetlibroHub:
     def is_online(self, serial: str) -> bool:
         return serial in self._online
 
+    def spawn(self, coro) -> None:
+        self._spawn(coro)
+
     def _spawn(self, coro) -> None:
         task = self.hass.async_create_background_task(coro, f"{DOMAIN} task")
         self._tasks.add(task)
@@ -121,6 +134,14 @@ class PetlibroHub:
 
     def _signal(self, serial: str) -> None:
         async_dispatcher_send(self.hass, SIGNAL_UPDATE.format(serial))
+        async_dispatcher_send(self.hass, SIGNAL_ANY)
+        self.alerts.evaluate()
+
+    def signal_all(self) -> None:
+        """Settings changed: entities that depend on them (water low) and the app refresh."""
+        for serial in self.devices:
+            async_dispatcher_send(self.hass, SIGNAL_UPDATE.format(serial))
+        async_dispatcher_send(self.hass, SIGNAL_ANY)
 
     # --- broker callbacks ---
     def _on_connect(self, serial: str, ip: str) -> None:
@@ -158,6 +179,7 @@ class PetlibroHub:
             dev.model = parsed.model
             self._save()
         dev.last_seen = time.monotonic()
+        dev.last_seen_ts = time.time()
         came_online = serial not in self._online
         self._online.add(serial)
 
@@ -225,6 +247,27 @@ class PetlibroHub:
             raise ServiceValidationError(str(err)) from err
         await self.async_command(serial, msg)
 
+    async def async_set_pump(self, serial: str, on: bool) -> None:
+        if self.info(serial).kind != FOUNTAIN:
+            raise ServiceValidationError("Only fountains have a pump")
+        await self.async_set_attrs(serial, protocol.pump(on), {"pump_on": on})
+
+    async def async_set_light(self, serial: str, on: bool) -> None:
+        info = self.info(serial)
+        if info.kind == FOUNTAIN:
+            msg = protocol.fountain_light(on)
+        elif info.light_switch:
+            msg = protocol.indicator_light(on)
+        else:
+            raise ServiceValidationError(f"{info.name} has no controllable light")
+        await self.async_set_attrs(serial, msg, {"light": on})
+
+    async def async_reset_filter(self, serial: str) -> None:
+        if self.info(serial).kind != FOUNTAIN:
+            raise ServiceValidationError("Only fountains have a filter")
+        msg = protocol.filter_reset(FILTER_LIFE_DAYS)
+        await self.async_set_attrs(serial, msg, {"filter_due_ms": msg["filterNextReplacementTimestamp"]})
+
     # --- plans ---
     def _wire_plan(self, serial: str) -> list[dict[str, Any]] | None:
         stored = self.plans.get(serial)
@@ -290,6 +333,84 @@ class PetlibroHub:
         stale = mono - self._plan_synced.get(serial, 0) >= PLAN_RESYNC
         if (changed or stale) and self._plan_tries.get(serial, 0) < PLAN_MAX_TRIES:
             self._spawn(self._sync_plan(serial))
+
+    # --- views for the alert engine and the app ---
+    def device_name(self, serial: str) -> str:
+        """The name the user sees: the device registry name (renamed or not)."""
+        reg = dr.async_get(self.hass).async_get_device(identifiers={(DOMAIN, serial)})
+        if reg is not None and (reg.name_by_user or reg.name):
+            return reg.name_by_user or reg.name
+        return f"{self.info(serial).name} {serial[-4:]}"
+
+    def alert_devices(self) -> list[dict[str, Any]]:
+        out = []
+        for serial, dev in self.devices.items():
+            info = self.info(serial)
+            online = serial in self._online
+            nxt = self.next_feed(serial)
+            out.append({
+                "serial": serial, "name": self.device_name(serial), "kind": info.kind, "online": online,
+                "offline_since": None if online else (dev.last_seen_ts or self.started_ts),
+                "battery": info.battery, "data": dev.data, "feeds_today": self._feeds_today(dev),
+                "next_feed": (int(nxt[0].timestamp() * 1000), nxt[1]) if nxt else None,
+            })
+        return out
+
+    @staticmethod
+    def _feeds_today(dev: DeviceState) -> int:
+        return dev.feeds_today if dev.feeds_day == dt_util.now().date() else 0
+
+    def view(self, serial: str, admin: bool = True) -> dict[str, Any]:
+        """Everything the Overview tab shows about one device."""
+        dev, info, d = self.devices[serial], self.info(serial), self.devices[serial].data
+        now = time.time()
+        out: dict[str, Any] = {
+            "id": serial if admin else f"...{serial[-4:]}", "name": self.device_name(serial), "model": dev.model,
+            "model_name": info.name, "kind": info.kind, "online": serial in self._online,
+            "last_seen_ts": int(dev.last_seen_ts * 1000) if dev.last_seen_ts else None,
+            "can_feed": bool(info.max_portions), "max_portions": info.max_portions,
+            "can_light": info.kind == FOUNTAIN or info.light_switch,
+            "light": d.get("light"), "battery": d.get("battery") if info.battery else None,
+            "has_battery": info.battery, "rssi": d.get("rssi"),
+        }
+        if info.kind == FEEDER:
+            nxt = self.next_feed(serial)
+            out.update(
+                food_low=alertlib.food_low(d), feed_blocked=d.get("feed_blocked"),
+                last_feed_ms=d.get("last_feed_ms"), last_feed_portions=d.get("last_feed_portions"),
+                last_feed_scheduled=d.get("last_feed_scheduled"), feeds_today=self._feeds_today(dev),
+                plan_managed=serial in self.plans,
+                next_feed=({"ts": int(nxt[0].timestamp() * 1000), "portions": nxt[1]} if nxt else None),
+                feed_portions=self.feed_portions.get(serial, 1))
+        elif info.kind == FOUNTAIN:
+            override = self.alerts.water_override()
+            limit, source = alertlib.water_threshold(d, override)
+            days = alertlib.filter_days_left(d, now)
+            out.update(
+                pump_on=d.get("pump_on"), charging=alertlib.charging(d), plugged_in=alertlib.plugged_in(d),
+                battery_state=d.get("battery_state"), water_weight=d.get("water_weight"),
+                water_low=alertlib.water_low(d, override), water_threshold=limit, water_threshold_source=source,
+                device_low_water=d.get("low_water"), filter_due_ms=d.get("filter_due_ms"),
+                filter_days_left=None if days is None else round(days, 1), filter_overdue=None if days is None else days <= 0,
+                radar_seen_ms=d.get("radar_seen_ms"), radar_now=d.get("radar_now"))
+        return out
+
+    def plan_sync_state(self, serial: str) -> str:
+        """"synced", "pending" (waiting for the feeder to confirm) or "none" (no plan from Home Assistant)."""
+        wire = self._wire_plan(serial)
+        if wire is None:
+            return "none"
+        return "synced" if planlib.signature(wire) == self._plan_sig.get(serial) else "pending"
+
+    def schedule_view(self, serial: str, admin: bool = True) -> dict[str, Any]:
+        stored = self.plans.get(serial)
+        upcoming = planlib.upcoming(stored, self.tz, datetime.now(timezone.utc)) if stored else []
+        return {
+            "id": serial if admin else f"...{serial[-4:]}", "name": self.device_name(serial), "max_portions": self.info(serial).max_portions,
+            "configured": stored is not None, "meals": stored or [], "sync": self.plan_sync_state(serial),
+            "online": serial in self._online, "time_zone": str(self.tz),
+            "upcoming": [{"ts": int(at.timestamp() * 1000), "portions": p, "label": label} for at, p, label in upcoming],
+        }
 
     # --- diagnostics ---
     def snapshot(self) -> dict[str, Any]:

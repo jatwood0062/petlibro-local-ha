@@ -23,6 +23,6 @@ set_feeding_plan:
           integration: petlibro_lan
     plans:
       required: true
-      example: '[{"time": "07:30", "portions": 2}, {"time": "18:00", "portions": 2, "days": [1, 2, 3, 4, 5]}]'
+      example: '[{"time": "07:30", "portions": 2, "label": "Breakfast"}, {"time": "18:00", "portions": 2, "days": [1, 2, 3, 4, 5], "enabled": true}]'
       selector:
         object:

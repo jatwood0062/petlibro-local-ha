@@ -45,6 +45,9 @@
       },
       "water_low": {
         "name": "Water low"
+      },
+      "filter_due": {
+        "name": "Filter due"
       }
     },
     "button": {

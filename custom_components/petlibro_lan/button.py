@@ -7,7 +7,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import protocol
-from .const import FILTER_LIFE_DAYS
 from .entity import FEEDER, FOUNTAIN, PetlibroEntity, setup_entities
 
 
@@ -24,9 +23,7 @@ class ResetFilter(PetlibroEntity, ButtonEntity):
         super().__init__(hub, serial, "reset_filter")
 
     async def async_press(self) -> None:
-        msg = protocol.filter_reset(FILTER_LIFE_DAYS)
-        await self.hub.async_set_attrs(
-            self.serial, msg, {"filter_due_ms": msg["filterNextReplacementTimestamp"]})
+        await self.hub.async_reset_filter(self.serial)
 
 
 class ZeroScale(PetlibroEntity, ButtonEntity):

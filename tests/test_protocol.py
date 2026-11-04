@@ -227,3 +227,15 @@ def test_command_replies_are_never_acked_on_any_channel():
         assert protocol.respond(channel, reply, NOW, CHICAGO) == []
     assert protocol.respond("event", {"cmd": "MANUAL_FEEDING_SERVICE", "msgId": "x"}, NOW, CHICAGO) == []
     assert protocol.respond("event", {"cmd": "DEVICE_LOG_REPORT_EVENT", "msgId": "y", "logs": []}, NOW, CHICAGO)
+
+
+def test_water_cap_radar_and_flat_message():
+    out = protocol.parse_message("event", {"cmd": "WATER_CAP_EVENT", "content": [
+        {"weight": 2290, "radarDetected": False}, {"weight": 2285, "radarDetected": True},
+        {"weight": 2284, "radarDetected": False}]}, 1000)
+    assert out["water_weight"] == 2284 and out["radar_now"] is False and out["radar_seen_ms"] == 1000
+    out = protocol.parse_message("event", {"cmd": "WATER_CAP_EVENT", "content": [{"weight": 2000, "radarDetected": False}]}, 5)
+    assert "radar_seen_ms" not in out and out["radar_now"] is False
+    out = protocol.parse_message("event", {"cmd": "WATER_CAP_EVENT", "weight": 1800}, 5)
+    assert out == {"water_weight": 1800}
+    assert protocol.parse_message("event", {"cmd": "WATER_CAP_EVENT", "content": []}, 5) == {}

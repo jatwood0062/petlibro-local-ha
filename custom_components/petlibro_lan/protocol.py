@@ -297,13 +297,21 @@ def parse_message(channel: str, msg: dict[str, Any], now: int) -> dict[str, Any]
                 if expect is not None:
                     out["feed_blocked"] = actual < expect
     elif cmd == "WATER_CAP_EVENT":
-        samples = [s for s in msg.get("content", []) if isinstance(s, dict)] if isinstance(msg.get("content"), list) else []
+        content = msg.get("content")
+        samples = [s for s in content if isinstance(s, dict)] if isinstance(content, list) else []
+        if not samples and "weight" in msg:  # tolerate a flat message without the sample list
+            samples = [msg]
         if samples:
             last = samples[-1]
             if (val := _num(last.get("weight"))) is not None:
                 out["water_weight"] = val
             if (val := _num(last.get("weightPercent"))) is not None:
                 out["water_percent"] = val
+            radar = [_bool(s.get("radarDetected")) for s in samples]
+            if any(r is not None for r in radar):
+                out["radar_now"] = bool(radar[-1])
+                if any(radar):  # a pet was at the fountain during this report
+                    out["radar_seen_ms"] = now
     elif cmd == "ERROR_EVENT" and (val := _num(msg.get("errorCode"))) is not None:
         out["error_code"] = int(val)
         if val == 2032:

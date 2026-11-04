@@ -100,3 +100,42 @@ def test_next_feed():
     weekdays = plans.normalize([{"time": "07:00", "portions": 1, "days": [1]}], 12)  # Mondays
     at, _ = plans.next_feed(weekdays, CHICAGO, utc(2026, 1, 14, 14))  # Wednesday
     assert at == utc(2026, 1, 19, 13)
+
+
+# --- label / enabled (schedule editor) and the round trip ---
+def test_label_and_enabled_roundtrip():
+    raw = [{"time": "07:30", "portions": 2, "label": " Breakfast ", "days": [1, 2]},
+           {"time": "18:00", "portions": 1, "enabled": False, "label": ""},
+           {"time": "12:00", "portions": 1, "enabled": True}]
+    out = plans.normalize(raw, 12)
+    assert out == [{"time": "07:30", "portions": 2, "days": [1, 2], "label": "Breakfast"},
+                   {"time": "12:00", "portions": 1, "days": [1, 2, 3, 4, 5, 6, 7]},
+                   {"time": "18:00", "portions": 1, "days": [1, 2, 3, 4, 5, 6, 7], "enabled": False}]
+    assert plans.normalize(out, 12) == out  # what the editor loads can be saved again unchanged
+
+
+@pytest.mark.parametrize("bad", [
+    {"label": 5}, {"label": "x" * 41}, {"label": "a\nb"}, {"enabled": "no"}, {"enabled": 1}])
+def test_label_enabled_rejected(bad):
+    with pytest.raises(ValueError):
+        plans.normalize([{"time": "07:30", "portions": 1, **bad}], 12)
+
+
+def test_disabled_meals_never_reach_the_device_or_next_feed():
+    stored = plans.normalize([{"time": "07:00", "portions": 1}, {"time": "08:00", "portions": 2, "enabled": False}], 12)
+    wire = plans.to_wire(stored, CHICAGO, utc(2026, 1, 14, 12), 0)
+    assert [p["grainNum"] for p in wire] == [1]
+    at, portions = plans.next_feed(stored, CHICAGO, utc(2026, 1, 14, 12))
+    assert portions == 1
+    off = plans.normalize([{"time": "07:00", "portions": 1, "enabled": False}], 12)
+    assert plans.to_wire(off, CHICAGO, utc(2026, 1, 14), 0) == [] and plans.next_feed(off, CHICAGO, utc(2026, 1, 14)) is None
+
+
+def test_upcoming_three():
+    stored = plans.normalize([{"time": "07:00", "portions": 2, "label": "Breakfast"}, {"time": "18:00", "portions": 3}], 12)
+    # 14:00Z = 08:00 CST: 18:00 today, 07:00 tomorrow, 18:00 tomorrow
+    out = plans.upcoming(stored, CHICAGO, utc(2026, 1, 14, 14))
+    assert out == [(utc(2026, 1, 15, 0), 3, ""), (utc(2026, 1, 15, 13), 2, "Breakfast"), (utc(2026, 1, 16, 0), 3, "")]
+    assert plans.upcoming([], CHICAGO, utc(2026, 1, 14)) == []
+    weekly = plans.normalize([{"time": "07:00", "portions": 1, "days": [1]}], 12)
+    assert len(plans.upcoming(weekly, CHICAGO, utc(2026, 1, 14, 14))) == 1

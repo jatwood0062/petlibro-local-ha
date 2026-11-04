@@ -18,7 +18,8 @@ class DeviceState:
         self.model = model
         self.data: dict[str, Any] = {}
         self.ip: str | None = None
-        self.last_seen: float | None = None
+        self.last_seen: float | None = None  # monotonic
+        self.last_seen_ts: float | None = None  # wall clock (epoch seconds)
         self.feeds_today = 0
         self.feeds_day: date | None = None
         self._seen: deque[tuple[str, str, str]] = deque(maxlen=DEDUPE)

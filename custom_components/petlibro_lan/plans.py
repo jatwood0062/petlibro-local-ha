@@ -11,6 +11,7 @@ from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
 MAX_PLANS = 24
+MAX_LABEL = 40
 ALL_DAYS = (1, 2, 3, 4, 5, 6, 7)
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -35,7 +36,19 @@ def normalize(raw: object, max_portions: int) -> list[dict[str, Any]]:
         if (not isinstance(days, list) or not days
                 or any(isinstance(d, bool) or not isinstance(d, int) or not 1 <= d <= 7 for d in days)):
             raise ValueError("days must be a list of 1 (Monday) to 7 (Sunday)")
-        out.append({"time": text[:5], "portions": portions, "days": sorted(set(days))})
+        entry: dict[str, Any] = {"time": text[:5], "portions": portions, "days": sorted(set(days))}
+        label = item.get("label")
+        if label is not None:
+            if not isinstance(label, str) or len(label.strip()) > MAX_LABEL or any(ord(c) < 32 for c in label):
+                raise ValueError(f"label must be text of at most {MAX_LABEL} characters")
+            if label.strip():
+                entry["label"] = label.strip()
+        enabled = item.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be true or false")
+        if not enabled:  # only stored when off, so plans without these keys keep their old form
+            entry["enabled"] = False
+        out.append(entry)
     return sorted(out, key=lambda p: (p["time"], p["portions"]))
 
 
@@ -44,6 +57,8 @@ def _occurrences(plans: list[dict[str, Any]], tz: tzinfo, now: datetime):
     local_now = now.astimezone(tz)
     today = local_now.date()
     for plan in plans:
+        if plan.get("enabled") is False:
+            continue  # a disabled meal is kept for the editor but never reaches the device
         hh, mm = int(plan["time"][:2]), int(plan["time"][3:5])
         for day in plan["days"]:
             date = today + timedelta(days=(day - 1 - today.weekday()) % 7)
@@ -78,3 +93,9 @@ def next_feed(plans: list[dict[str, Any]], tz: tzinfo, now: datetime) -> tuple[d
         return None
     at, portions = min(found)
     return at.astimezone(timezone.utc), portions
+
+
+def upcoming(plans: list[dict[str, Any]], tz: tzinfo, now: datetime, count: int = 3) -> list[tuple[datetime, int, str]]:
+    """The next ``count`` feeds as (UTC time, portions, label), soonest first."""
+    found = sorted((at, plan["portions"], plan.get("label", "")) for plan, _d, at in _occurrences(plans, tz, now))
+    return [(at.astimezone(timezone.utc), portions, label) for at, portions, label in found[:count]]

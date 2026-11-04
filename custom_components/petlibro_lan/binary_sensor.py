@@ -1,6 +1,7 @@
-"""Binary sensors: connectivity, food low, dispenser blocked, water low."""
+"""Binary sensors: connectivity, food low, dispenser blocked, water low, filter due."""
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -15,26 +16,32 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import alerts
+from .hub import PetlibroHub
 from .entity import FEEDER, FOUNTAIN, PetlibroEntity, setup_entities
 
 
-def _food_low(d: dict[str, Any]) -> bool | None:
-    return None if "food_present" not in d else not d["food_present"]
+def _food_low(d: dict[str, Any], hub: PetlibroHub) -> bool | None:
+    return alerts.food_low(d)
 
 
-def _water_low(d: dict[str, Any]) -> bool | None:
-    if "water_weight" not in d or "low_water" not in d:
-        return None
-    return d["water_weight"] < d["low_water"]
+def _water_low(d: dict[str, Any], hub: PetlibroHub) -> bool | None:
+    """Weight below the user's threshold from the app, else the device's own plausible one, else 500 g."""
+    return alerts.water_low(d, hub.alerts.water_override())
 
 
-def _blocked(d: dict[str, Any]) -> bool | None:
+def _filter_due(d: dict[str, Any], hub: PetlibroHub) -> bool | None:
+    days = alerts.filter_days_left(d, time.time())
+    return None if days is None else days <= 0
+
+
+def _blocked(d: dict[str, Any], hub: PetlibroHub) -> bool | None:
     return d.get("feed_blocked")
 
 
 @dataclass(frozen=True, kw_only=True)
 class Desc(BinarySensorEntityDescription):
-    value: Callable[[dict[str, Any]], bool | None]
+    value: Callable[[dict[str, Any], PetlibroHub], bool | None]
 
 
 FEEDER_SENSORS = (
@@ -43,6 +50,7 @@ FEEDER_SENSORS = (
 )
 FOUNTAIN_SENSORS = (
     Desc(key="water_low", device_class=BinarySensorDeviceClass.PROBLEM, value=_water_low),
+    Desc(key="filter_due", device_class=BinarySensorDeviceClass.PROBLEM, value=_filter_due),
 )
 
 
@@ -53,7 +61,7 @@ class PetlibroBinarySensor(PetlibroEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return self.entity_description.value(self.data)
+        return self.entity_description.value(self.data, self.hub)
 
 
 class Connectivity(PetlibroEntity, BinarySensorEntity):
