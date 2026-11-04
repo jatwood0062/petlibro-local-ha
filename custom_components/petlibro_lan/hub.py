@@ -337,7 +337,8 @@ class PetlibroHub:
     # --- views for the alert engine and the app ---
     def device_name(self, serial: str) -> str:
         """The name the user sees: the device registry name (renamed or not)."""
-        reg = dr.async_get(self.hass).async_get_device(identifiers={(DOMAIN, serial)})
+        reg = next((d for d in dr.async_entries_for_config_entry(dr.async_get(self.hass), self.entry.entry_id)
+                    if (DOMAIN, serial) in d.identifiers), None)
         if reg is not None and (reg.name_by_user or reg.name):
             return reg.name_by_user or reg.name
         return f"{self.info(serial).name} {serial[-4:]}"
