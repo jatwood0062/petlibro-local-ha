@@ -22,6 +22,7 @@ from .const import (
     AVAILABILITY_TIMEOUT,
     COMMAND_TIMEOUT,
     CONF_PORT,
+    CONF_TLS_FORWARD,
     DEFAULT_PORT,
     DOMAIN,
     PLAN_MAX_TRIES,
@@ -32,6 +33,7 @@ from .const import (
     SIGNAL_UPDATE,
     STORE_VERSION,
 )
+from .hosts import parse_forward
 from .models import FEEDER, ModelInfo, model_info
 from .state import DeviceState
 
@@ -52,6 +54,7 @@ class PetlibroHub:
         self.broker = Broker(
             self._on_publish, self._on_connect, self._on_disconnect,
             port=entry.options.get(CONF_PORT, DEFAULT_PORT),
+            tls_forward=parse_forward(entry.options.get(CONF_TLS_FORWARD, "")),
         )
         self.devices: dict[str, DeviceState] = {}
         self.plans: dict[str, list[dict[str, Any]]] = {}  # only devices with a user-configured plan

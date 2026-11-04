@@ -77,6 +77,14 @@ data:
   (up to 24 times) and logs a warning.
 - Check the first plan against the real feeder (and the app, if you still use it) before relying on it.
 
+## Sharing port 1883
+
+PetLibro devices always dial port 1883. If another device that is also DNS-redirected to Home
+Assistant needs that port and speaks TLS (for example an add-on that impersonates a pump's cloud),
+move that add-on off host port 1883 and set **Relay TLS connections to** in this integration's
+options to its address, e.g. `local-my-addon:1883`. TLS connections are passed through untouched;
+plain MQTT stays with PetLibro Local.
+
 ## Security
 
 The broker listens on 0.0.0.0:1883 and accepts only private / link-local IPv4 peers, at most 16

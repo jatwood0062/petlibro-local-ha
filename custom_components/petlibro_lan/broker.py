@@ -10,6 +10,10 @@ client ids must look like PetLibro serials; a client can only publish to and sub
 own ``dl/<model>/<serial>/`` prefix (anything else is dropped). Credentials are not checked: the
 devices use static ones that mean nothing locally. Parsing is strict and never raises out of a
 connection task. Only QoS 0 and 1 are supported (QoS 2 closes the connection); nothing is retained.
+
+Port sharing: other devices may be redirected to port 1883 too (e.g. a TLS MQTT pump handled by
+another add-on). A connection that opens with a TLS handshake is relayed unchanged to
+``tls_forward`` when one is set, and refused otherwise. The LAN-only and connection limits apply.
 """
 from __future__ import annotations
 
@@ -35,6 +39,8 @@ IDLE_FACTOR = 1.5
 MAX_FILTERS = 16
 RATE_PER_SEC = 20.0
 RATE_BURST = 60.0
+TLS_HANDSHAKE = 0x16  # first byte of a TLS ClientHello; MQTT CONNECT starts with 0x10
+FORWARD_IDLE = 600.0
 
 CONNECT, CONNACK, PUBLISH, PUBACK = 1, 2, 3, 4
 SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK = 8, 9, 10, 11
@@ -198,11 +204,13 @@ class Broker:
         client_ok: Callable[[str], bool] = valid_serial,
         connect_timeout: float = CONNECT_TIMEOUT,
         default_idle: float = DEFAULT_IDLE,
+        tls_forward: tuple[str, int] | None = None,
     ) -> None:
         self._on_publish, self._on_connect, self._on_disconnect = on_publish, on_connect, on_disconnect
         self.host, self.port = host, port
         self._peer_ok, self._client_ok = peer_ok, client_ok
         self._connect_timeout, self._default_idle = connect_timeout, default_idle
+        self._tls_forward = tls_forward
         self._server: asyncio.AbstractServer | None = None
         self._conns: dict[str, _Conn] = {}
         self._active = 0
@@ -289,8 +297,10 @@ class Broker:
             _LOGGER.exception("MQTT callback failed")
 
     @staticmethod
-    async def _read_packet(reader: asyncio.StreamReader, first_timeout: float) -> tuple[int, int, bytes]:
-        first = (await asyncio.wait_for(reader.readexactly(1), first_timeout))[0]
+    async def _read_packet(reader: asyncio.StreamReader, first_timeout: float,
+                           first: int | None = None) -> tuple[int, int, bytes]:
+        if first is None:
+            first = (await asyncio.wait_for(reader.readexactly(1), first_timeout))[0]
         length, mult = 0, 1
         for _ in range(4):
             byte = (await asyncio.wait_for(reader.readexactly(1), PACKET_TIMEOUT))[0]
@@ -306,7 +316,13 @@ class Broker:
         return first >> 4, first & 0x0F, body
 
     async def _session(self, conn: _Conn) -> None:
-        ptype, flags, body = await self._read_packet(conn.reader, self._connect_timeout)
+        first = (await asyncio.wait_for(conn.reader.readexactly(1), self._connect_timeout))[0]
+        if first == TLS_HANDSHAKE:
+            if self._tls_forward is None:
+                raise MqttError("TLS connection and no TLS forward configured")
+            await self._forward(conn, bytes([first]), *self._tls_forward)
+            return
+        ptype, flags, body = await self._read_packet(conn.reader, self._connect_timeout, first)
         if ptype != CONNECT or flags:
             raise MqttError("first packet must be CONNECT")
         try:
@@ -346,6 +362,29 @@ class Broker:
                 continue
             else:
                 raise MqttError(f"unsupported packet type {ptype}")
+
+    async def _forward(self, conn: _Conn, head: bytes, host: str, port: int) -> None:
+        """Relay a connection byte for byte to another server (the stream is not inspected)."""
+        up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), CONNECT_TIMEOUT)
+        _LOGGER.debug("Relaying TLS connection from %s to %s:%s", conn.ip, host, port)
+
+        async def pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            while data := await asyncio.wait_for(src.read(65536), FORWARD_IDLE):
+                dst.write(data)
+                await asyncio.wait_for(dst.drain(), WRITE_TIMEOUT)
+
+        try:
+            up_writer.write(head)
+            tasks = [asyncio.ensure_future(pipe(conn.reader, up_writer)),
+                     asyncio.ensure_future(pipe(up_reader, conn.writer))]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            up_writer.close()
 
     async def _publish(self, conn: _Conn, flags: int, body: bytes) -> None:
         qos = (flags >> 1) & 3

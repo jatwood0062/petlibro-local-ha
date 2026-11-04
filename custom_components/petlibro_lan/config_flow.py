@@ -9,7 +9,8 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
 
-from .const import CLOUD_HOST, CONF_PORT, DEFAULT_PORT, DOMAIN, NAME
+from .const import CLOUD_HOST, CONF_PORT, CONF_TLS_FORWARD, DEFAULT_PORT, DOMAIN, NAME
+from .hosts import parse_forward
 
 PORT = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
 
@@ -48,14 +49,20 @@ class PetlibroOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         current = self.config_entry.options.get(CONF_PORT, DEFAULT_PORT)
+        forward = self.config_entry.options.get(CONF_TLS_FORWARD, "")
         if user_input is not None:
-            port = user_input[CONF_PORT]
+            port, forward = user_input[CONF_PORT], user_input.get(CONF_TLS_FORWARD, "").strip()
             # the running broker holds its own port, so only a changed port can be probed
             if port != current and not await self.hass.async_add_executor_job(port_free, port):
                 errors[CONF_PORT] = "port_in_use"
+            elif forward and parse_forward(forward) is None:
+                errors[CONF_TLS_FORWARD] = "bad_forward"
             else:
-                return self.async_create_entry(data={CONF_PORT: port})
+                return self.async_create_entry(data={CONF_PORT: port, CONF_TLS_FORWARD: forward})
         return self.async_show_form(
             step_id="init", errors=errors,
-            data_schema=vol.Schema({vol.Required(CONF_PORT, default=current): PORT}),
+            data_schema=vol.Schema({
+                vol.Required(CONF_PORT, default=current): PORT,
+                vol.Optional(CONF_TLS_FORWARD, description={"suggested_value": forward}): str,
+            }),
             description_placeholders={"hostname": CLOUD_HOST})

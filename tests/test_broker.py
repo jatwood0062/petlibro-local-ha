@@ -395,3 +395,47 @@ def test_stop_with_connected_client_does_not_hang():
         await asyncio.wait_for(b.stop(), 7)
         assert not b.clients and await c.closed()
     run(go())
+
+
+def test_tls_is_relayed_to_forward_target_and_mqtt_still_served():
+    async def go():
+        async def echo(r, w):  # stands in for the other add-on: echoes back with a prefix
+            while data := await r.read(1024):
+                w.write(b"UP:" + data)
+                await w.drain()
+            w.close()
+        up = await asyncio.start_server(echo, "127.0.0.1", 0)
+        target = ("127.0.0.1", up.sockets[0].getsockname()[1])
+        try:
+            async with Harness(tls_forward=target) as h:
+                c = await h.client()
+                await c.send(b"\x16\x03\x01hello")
+                assert (await c.recv(3)) == b"UP:"
+                got = b""
+                while len(got) < 8:
+                    got += await asyncio.wait_for(c.r.read(64), 2)
+                assert got.replace(b"UP:", b"") == b"\x16\x03\x01hello"
+                c.close()
+                m = await h.client()
+                assert await m.handshake() == b"\x20\x02\x00\x00"
+                m.close()
+                assert h.published == []
+        finally:
+            up.close()
+    run(go())
+
+
+def test_tls_refused_without_forward_target():
+    async def go():
+        async with Harness() as h:
+            c = await h.client()
+            await c.send(b"\x16\x03\x01hello")
+            assert await c.closed()
+    run(go())
+
+
+def test_parse_forward():
+    hosts = load("hosts")
+    assert hosts.parse_forward("local-kamoer-kwc-se:1883") == ("local-kamoer-kwc-se", 1883)
+    for bad in ("", "x", "a:0", "a:70000", "a b:1", "a:1:2", "h:p", None):
+        assert hosts.parse_forward(bad) is None

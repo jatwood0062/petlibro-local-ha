@@ -19,50 +19,103 @@
         "title": "PetLibro Local options",
         "description": "Devices always dial `{hostname}` on port 1883, so change this only if you forward that port to Home Assistant.",
         "data": {
-          "port": "Broker port"
+          "port": "Broker port",
+          "tls_forward": "Relay TLS connections to"
+        },
+        "data_description": {
+          "tls_forward": "Another server (host:port) that should get TLS connections arriving on the broker port, e.g. an add-on whose device also dials port 1883. Leave empty to refuse them."
         }
       }
     },
     "error": {
-      "port_in_use": "That port is already in use on this host."
+      "port_in_use": "That port is already in use on this host.",
+      "bad_forward": "Use host:port, for example local-my-addon:1883."
     }
   },
   "entity": {
     "binary_sensor": {
-      "connectivity": {"name": "Connected"},
-      "food_low": {"name": "Food low"},
-      "dispenser_blocked": {"name": "Dispenser blocked"},
-      "water_low": {"name": "Water low"}
+      "connectivity": {
+        "name": "Connected"
+      },
+      "food_low": {
+        "name": "Food low"
+      },
+      "dispenser_blocked": {
+        "name": "Dispenser blocked"
+      },
+      "water_low": {
+        "name": "Water low"
+      }
     },
     "button": {
-      "feed_now": {"name": "Feed now"},
-      "reset_filter": {"name": "Reset filter"},
-      "zero_scale": {"name": "Zero scale"}
+      "feed_now": {
+        "name": "Feed now"
+      },
+      "reset_filter": {
+        "name": "Reset filter"
+      },
+      "zero_scale": {
+        "name": "Zero scale"
+      }
     },
     "number": {
-      "feed_portions": {"name": "Portions for feed now"}
+      "feed_portions": {
+        "name": "Portions for feed now"
+      }
     },
     "sensor": {
-      "battery": {"name": "Battery"},
+      "battery": {
+        "name": "Battery"
+      },
       "power_source": {
         "name": "Power source",
-        "state": {"battery": "Battery", "mains": "Mains", "unknown": "Unknown"}
+        "state": {
+          "battery": "Battery",
+          "mains": "Mains",
+          "unknown": "Unknown"
+        }
       },
-      "rssi": {"name": "Wi-Fi signal"},
-      "last_feed_time": {"name": "Last feed"},
-      "last_feed_portions": {"name": "Last feed portions"},
-      "feeds_today": {"name": "Feeds today"},
-      "feeding_plan": {"name": "Feeding plan"},
-      "water_weight": {"name": "Water weight"},
-      "water_level": {"name": "Water level"},
-      "filter_days": {"name": "Filter remaining"},
-      "ip_address": {"name": "IP address"}
+      "rssi": {
+        "name": "Wi-Fi signal"
+      },
+      "last_feed_time": {
+        "name": "Last feed"
+      },
+      "last_feed_portions": {
+        "name": "Last feed portions"
+      },
+      "feeds_today": {
+        "name": "Feeds today"
+      },
+      "feeding_plan": {
+        "name": "Feeding plan"
+      },
+      "water_weight": {
+        "name": "Water weight"
+      },
+      "water_level": {
+        "name": "Water level"
+      },
+      "filter_days": {
+        "name": "Filter remaining"
+      },
+      "ip_address": {
+        "name": "IP address"
+      }
     },
     "switch": {
-      "indicator_light": {"name": "Indicator light"},
-      "button_lock": {"name": "Button lock"},
-      "pump": {"name": "Pump"},
-      "light": {"name": "Light"}
+      "indicator_light": {
+        "name": "Indicator light"
+      },
+      "button_lock": {
+        "name": "Button lock"
+      },
+      "pump": {
+        "name": "Pump"
+      },
+      "light": {
+        "name": "Light"
+      }
     }
   },
   "services": {
@@ -70,16 +123,28 @@
       "name": "Feed",
       "description": "Dispenses portions now.",
       "fields": {
-        "device_id": {"name": "Feeder", "description": "The feeder to use."},
-        "portions": {"name": "Portions", "description": "Number of portions (1-12 on the Granary, 1-5 on the One RFID)."}
+        "device_id": {
+          "name": "Feeder",
+          "description": "The feeder to use."
+        },
+        "portions": {
+          "name": "Portions",
+          "description": "Number of portions (1-12 on the Granary, 1-5 on the One RFID)."
+        }
       }
     },
     "set_feeding_plan": {
       "name": "Set feeding plan",
       "description": "Replaces the feeder's schedule. Times are in the Home Assistant time zone and are converted to UTC for the device. An empty list clears the schedule on the device.",
       "fields": {
-        "device_id": {"name": "Feeder", "description": "The feeder to use."},
-        "plans": {"name": "Plans", "description": "List of entries with time (HH:MM), portions and optional days (1 = Monday to 7 = Sunday; default every day)."}
+        "device_id": {
+          "name": "Feeder",
+          "description": "The feeder to use."
+        },
+        "plans": {
+          "name": "Plans",
+          "description": "List of entries with time (HH:MM), portions and optional days (1 = Monday to 7 = Sunday; default every day)."
+        }
       }
     }
   }

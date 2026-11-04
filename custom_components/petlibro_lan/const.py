@@ -8,6 +8,7 @@ CLOUD_HOST = "mqtt.us.petlibro.com"
 
 CONF_PORT = "port"
 DEFAULT_PORT = 1883
+CONF_TLS_FORWARD = "tls_forward"  # "host:port" that TLS connections on the broker port are relayed to
 
 AVAILABILITY_TIMEOUT = 300  # seconds without any message before a device is unavailable
 POLL_INTERVAL = 300  # seconds between ATTR_GET_SERVICE requests

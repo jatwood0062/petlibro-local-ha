@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.1]
+
+- Share port 1883 with another device: connections that start with a TLS handshake are relayed
+  unchanged to a host:port set in the options ("Relay TLS connections to"), so a TLS MQTT add-on
+  can keep working beside the broker. Without the option they are refused, as before.
+
 ## [0.1.0]
 
 First release.
