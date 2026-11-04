@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2]
+
+- Fix a reply loop with the real Granary (PLAF103 fw 1.1.1): it answers ATTR_GET_SERVICE on
+  `event/post`, and acknowledging that answer made it reply again several times a second. Replies
+  to our commands (`*_SERVICE`) are now never acknowledged, whatever channel they arrive on.
+
 ## [0.1.1]
 
 - Share port 1883 with another device: connections that start with a TLS handshake are relayed

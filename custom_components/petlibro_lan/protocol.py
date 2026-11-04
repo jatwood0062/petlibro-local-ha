@@ -138,11 +138,12 @@ def respond(
 ) -> list[tuple[str, dict[str, Any]]]:
     """Replies owed for a message the device published: a list of (``sub`` channel, payload).
 
-    Heartbeats and replies on ``service/post`` get nothing (echoing a reply makes the device run
-    the command again). Messages carrying ``linkId`` are cloud echoes and are ignored.
+    Heartbeats and replies to our commands get nothing: a ``*_SERVICE`` cmd is a reply whichever
+    channel it arrives on (the Granary answers ATTR_GET_SERVICE on ``event/post``), and echoing it
+    makes the device run the command again, in a loop. Messages carrying ``linkId`` are cloud echoes.
     """
     cmd = msg.get("cmd")
-    if "linkId" in msg or not isinstance(cmd, str):
+    if "linkId" in msg or not isinstance(cmd, str) or is_reply(cmd):
         return []
     if channel == "ntp":
         return [("ntp", ntp_reply(now, tz))] if cmd == "NTP" else []
@@ -155,6 +156,11 @@ def respond(
     if cmd == "GET_FEEDING_PLAN_EVENT":
         return [("event", plan_reply(msg, now, wire_plans))]
     return [("event", ack(msg, now))]
+
+
+def is_reply(cmd: object) -> bool:
+    """True for the device's answer to one of our commands (never acknowledged)."""
+    return isinstance(cmd, str) and cmd.endswith("_SERVICE")
 
 
 # --- commands the server sends on service/sub ----------------------------------------

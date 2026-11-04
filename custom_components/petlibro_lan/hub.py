@@ -165,7 +165,7 @@ class PetlibroHub:
         local_today = dt_util.now().date()
         if "linkId" not in msg:
             dev.ingest(parsed.channel, msg, now, local_today)  # also the ATTR_GET_SERVICE replies
-            if parsed.channel == "service":
+            if parsed.channel == "service" or protocol.is_reply(msg.get("cmd")):
                 self._resolve(msg)
         wire = self._wire_plan(serial)
         for channel, reply in protocol.respond(parsed.channel, msg, now, self.tz, wire):

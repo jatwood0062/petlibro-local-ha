@@ -57,7 +57,7 @@ def test_decode():
 
 
 # --- acks, one per event type ---
-@pytest.mark.parametrize("cmd", ["DEVICE_START_EVENT", "ATTR_PUSH_EVENT", "ATTR_GET_SERVICE", "DEVICE_LOG_REPORT_EVENT",
+@pytest.mark.parametrize("cmd", ["DEVICE_START_EVENT", "ATTR_PUSH_EVENT", "DEVICE_LOG_REPORT_EVENT",
                                  "DETECTION_EVENT", "WAREHOUSE_DOOR_EVENT", "WATER_CAP_EVENT", "ERROR_EVENT"])
 def test_generic_event_ack(cmd):
     (channel, reply), = protocol.respond("event", {"cmd": cmd, "msgId": "abc", "success": True}, NOW, CHICAGO)
@@ -218,3 +218,12 @@ def test_state_heartbeat_drift():
 
 def test_non_finite_numbers_are_ignored():
     assert protocol.parse_attrs({"electricQuantity": float("inf"), "currentWeight": float("nan")}) == {}
+
+
+def test_command_replies_are_never_acked_on_any_channel():
+    # the real Granary (fw 1.1.1) answers ATTR_GET_SERVICE on event/post; acking it looped forever
+    reply = {"cmd": "ATTR_GET_SERVICE", "msgId": "5d906ae4", "code": 0, "surplusGrain": True}
+    for channel in ("event", "service"):
+        assert protocol.respond(channel, reply, NOW, CHICAGO) == []
+    assert protocol.respond("event", {"cmd": "MANUAL_FEEDING_SERVICE", "msgId": "x"}, NOW, CHICAGO) == []
+    assert protocol.respond("event", {"cmd": "DEVICE_LOG_REPORT_EVENT", "msgId": "y", "logs": []}, NOW, CHICAGO)
