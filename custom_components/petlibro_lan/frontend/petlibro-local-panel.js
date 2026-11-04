@@ -189,6 +189,8 @@ class PetsPanel extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    clearInterval(this._poll);
+    this._poll = null;
     if (this._unsub) {
       this._unsub();
       this._unsub = null;
@@ -201,7 +203,10 @@ class PetsPanel extends HTMLElement {
     if (first) {
       this._build();
       this._loadState();
-      this._subscribe();
+      if (this.isConnected) this._subscribe();
+      // the remembered tab is not the overview: load its data now, tab clicks are not coming
+      if (this._tab === "schedule") this._loadSchedules();
+      else if (this._tab === "alerts" && this._isAdmin) this._loadAlerts();
     }
     const admin = !!hass.user?.is_admin;
     if (this._admin !== admin) {

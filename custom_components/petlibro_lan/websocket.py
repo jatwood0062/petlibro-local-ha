@@ -101,8 +101,10 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
     def send() -> None:
         nonlocal pending
         pending = None
-        if hass.config_entries.async_loaded_entries(DOMAIN):
-            connection.send_message(websocket_api.event_message(msg["id"], _state(hub, connection.user.is_admin)))
+        # the hub is looked up again: the entry may have been reloaded since the app subscribed
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if entries and isinstance(current := getattr(entries[0], "runtime_data", None), PetlibroHub):
+            connection.send_message(websocket_api.event_message(msg["id"], _state(current, connection.user.is_admin)))
 
     @callback
     def changed(*_: Any) -> None:

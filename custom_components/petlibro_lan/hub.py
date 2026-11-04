@@ -94,11 +94,11 @@ class PetlibroHub:
                     self.plans[serial] = planlib.normalize(stored, info.max_portions)
                 except ValueError:
                     _LOGGER.warning("Ignoring invalid stored feeding plan for %s", _mask(serial))
+        await self.alerts.async_load()  # before the broker: a device update must not evaluate default settings
         try:
             await self.broker.start()
         except OSError as err:
             raise ConnectionError(f"cannot listen on port {self.broker.port}: {err}") from err
-        await self.alerts.async_load()
         self._unsub_tick = async_track_time_interval(self.hass, self._tick, timedelta(seconds=30))
         self.alerts.start()
 
