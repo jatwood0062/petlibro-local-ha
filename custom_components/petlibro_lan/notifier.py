@@ -94,6 +94,20 @@ class AlertManager:
     def water_override(self) -> float | None:
         return self.settings["alerts"]["water_low"].get("threshold_g")
 
+    def water_cfg(self) -> dict[str, Any]:
+        return self.settings["alerts"]["water_low"]
+
+    @callback
+    def forget_device(self, serial: str) -> None:
+        """A device was removed: drop its alert state and dismiss its notifications."""
+        for key in [k for k in (self.state.get("alerts") or {}) if k.endswith(f":{serial}")]:
+            del self.state["alerts"][key]
+        for alert in alerts.ALERT_TYPES:
+            persistent_notification.async_dismiss(self.hass, alerts.tag_for(alert, serial))
+        if (dumped := self._dump()) != self._saved:
+            self._saved = dumped
+            self._store.async_delay_save(self._data, SAVE_DELAY)
+
     def active(self) -> list[dict[str, Any]]:
         return alerts.active_alerts(self.state, {s: self.hub.device_name(s) for s in self.hub.devices})
 

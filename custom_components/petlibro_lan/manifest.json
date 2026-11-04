@@ -3,12 +3,12 @@
   "name": "PetLibro Local",
   "codeowners": ["@jatwood0062"],
   "config_flow": true,
-  "dependencies": ["frontend", "http", "panel_custom", "persistent_notification", "websocket_api"],
+  "dependencies": ["frontend", "http", "network", "panel_custom", "persistent_notification", "websocket_api"],
   "documentation": "https://github.com/jatwood0062/petlibro-local-ha",
   "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/jatwood0062/petlibro-local-ha/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

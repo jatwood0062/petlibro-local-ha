@@ -1,4 +1,4 @@
-// Pets sidebar app for PetLibro Local: Overview / Schedule / Alerts. Ships with petlibro_lan (no build step).
+// Pets sidebar app for PetLibro Local: Overview / Schedule / Alerts / Devices. Ships with petlibro_lan (no build step).
 // Custom element: petlibro-local-panel (Home Assistant sets hass, narrow, route and panel on it).
 // Reads are open to every user; every change goes through admin-only websocket commands.
 
@@ -6,7 +6,9 @@ const TABS = [
   ["overview", "Overview", "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"],
   ["schedule", "Schedule", "M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"],
   ["alerts", "Alerts", "M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"],
+  ["devices", "Devices", "M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z"],
 ];
+const ADMIN_TABS = new Set(["alerts", "devices"]);
 const MENU = "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z";
 const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -15,6 +17,8 @@ const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const MAX_MEALS = 24;
 const CLEAR_WORD = "CLEAR";
 const DAY_MS = 86400000;
+const MIN_SPAN_G = 300;
+const CAPTURE_SECONDS = 60;
 
 const svg = (d, size = 24) =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${d}"/></svg>`;
@@ -138,6 +142,25 @@ const STYLE = `
   .tlist label.chk { border-top: 1px solid var(--divider-color); }
   .tlist label.chk:first-child { border-top: none; }
   .chk .sub { display: block; color: var(--secondary-text-color); font-size: 12px; }
+  /* water level bar, spinner, devices, wizard */
+  .bar { position: relative; height: 14px; border-radius: 7px; background: var(--divider-color); overflow: hidden; margin: 2px 0 6px; }
+  .bar .fill { position: absolute; inset: 0 auto 0 0; background: var(--success-color, #43a047); border-radius: 7px; }
+  .bar.low .fill { background: var(--error-color, #db4437); }
+  .bar .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--primary-text-color); opacity: .55; }
+  .spin { display: inline-block; flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--divider-color);
+          border-top-color: var(--primary-color); animation: spin 1s linear infinite; vertical-align: -3px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 4s; } }
+  .waiting { display: flex; align-items: center; padding: 10px 12px; border-radius: 10px; border: 1px dashed var(--divider-color); margin-top: 12px; }
+  ol.guide { margin: 8px 0; padding-left: 22px; }
+  ol.guide li { margin: 6px 0; }
+  code { font-family: var(--code-font-family, monospace); font-size: 13px; background: var(--secondary-background-color, rgba(127,127,127,.15));
+         padding: 1px 5px; border-radius: 4px; }
+  .dlg.wiz { max-width: 480px; }
+  .wiz .big { font-size: 22px; font-weight: 500; }
+  .wiz input[type=number] { width: 120px; }
+  .wiz .live { padding: 8px 12px; border-radius: 10px; background: var(--secondary-background-color, rgba(127,127,127,.12)); }
+  .link { color: var(--primary-color); text-decoration: underline; font-size: 13px; padding: 4px 2px; }
   /* dialog + toast */
   .ov { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; padding: 16px; }
   .dlg { background: var(--card-background-color, #fff); color: var(--primary-text-color); border-radius: 14px;
@@ -177,6 +200,10 @@ class PetsPanel extends HTMLElement {
     this._targets = null;
     this._testResults = null;
     this._error = null;
+    this._guide = false; // the "Add a device" guide on the Devices tab
+    this._baseline = null; // serials known when the guide was opened
+    this._dns = null; // {loading} or the dns_check result
+    this._wiz = null; // the water-level calibration wizard, when open
   }
 
   // --- lifecycle ----------------------------------------------------------
@@ -266,7 +293,8 @@ class PetsPanel extends HTMLElement {
   _onState(state) {
     this._state = state;
     this._error = null;
-    if (this._tab === "overview") this._render();
+    if (this._wiz) this._wizLive();
+    if (this._tab === "overview" || this._tab === "devices") this._render();
     else if (this._tab === "alerts" && this._alerts) {
       this._alerts.active = state.active_alerts || [];
       const box = this._main.querySelector("#active");
@@ -359,7 +387,7 @@ class PetsPanel extends HTMLElement {
   }
 
   _setTab(tab) {
-    if (tab === "alerts" && !this._isAdmin) tab = "overview";
+    if (ADMIN_TABS.has(tab) && !this._isAdmin) tab = "overview";
     this._tab = tab;
     store.set(tab);
     this._render();
@@ -369,7 +397,7 @@ class PetsPanel extends HTMLElement {
 
   _render() {
     if (!this._main) return;
-    const tabs = TABS.filter((t) => t[0] !== "alerts" || this._isAdmin);
+    const tabs = TABS.filter((t) => !ADMIN_TABS.has(t[0]) || this._isAdmin);
     if (!tabs.some((t) => t[0] === this._tab)) this._tab = "overview";
     this._nav.innerHTML = tabs
       .map(([id, label, icon]) =>
@@ -385,6 +413,8 @@ class PetsPanel extends HTMLElement {
       this._main.innerHTML = this._overviewHtml();
     } else if (this._tab === "schedule") {
       this._main.innerHTML = this._scheduleHtml();
+    } else if (this._tab === "devices") {
+      this._main.innerHTML = this._devicesHtml();
     } else {
       this._main.innerHTML = this._alertsHtml();
     }
@@ -396,7 +426,7 @@ class PetsPanel extends HTMLElement {
     const devs = this._state.devices;
     if (!devs.length) {
       return `<div class="box empty">No PetLibro devices have connected yet.<br>
-        Point <code>mqtt.us.petlibro.com</code> at Home Assistant and power-cycle the device (see the integration's README).</div>`;
+        ${this._admin ? "Open the <strong>Devices</strong> tab and follow \"Add a device\"." : "Ask an administrator to add one from the Devices tab."}</div>`;
     }
     const alerts = this._state.active_alerts || [];
     const banner = alerts.length
@@ -420,6 +450,18 @@ class PetsPanel extends HTMLElement {
       : `${esc(d.model_name)} &middot; offline${d.last_seen_ts ? `, last seen ${esc(this._ago(d.last_seen_ts))}` : ""}`;
     return `<div class="dh"><span class="dot ${d.online ? "on" : ""}" aria-hidden="true"></span>
       <div class="t"><div class="n">${esc(d.name)}</div><div class="muted">${sub}</div></div></div>`;
+  }
+
+  _n(v, digits = 0) {
+    try {
+      return Number(v).toLocaleString(this._hass?.locale?.language, { maximumFractionDigits: digits });
+    } catch (e) {
+      return String(Math.round(Number(v)));
+    }
+  }
+
+  _calBtn(d) {
+    return `<button class="btn alt" data-act="calibrate" data-id="${esc(d.id)}">${d.calibrated ? "Recalibrate water level" : "Calibrate water level"}</button>`;
   }
 
   _btn(label, act, d, { alt = true, danger = false, extra = "" } = {}) {
@@ -454,9 +496,21 @@ class PetsPanel extends HTMLElement {
     const tri = (v, on, off) => (v === true ? this._chip(on, "ok") : v === false ? this._chip(off, "warn") : this._chip("Unknown"));
     let water = `<span class="muted">waiting for a reading</span>`;
     if (typeof d.water_weight === "number") {
-      const src = { user: "your threshold", device: "device threshold", default: "default threshold" }[d.water_threshold_source];
-      water = `${Math.round(d.water_weight)} g ${d.water_low ? this._chip("Low", "bad") : this._chip("OK", "ok")}
-        <div class="muted">low below ${Math.round(d.water_threshold)} g (${src})</div>`;
+      const src = { user: "your threshold", device: "device threshold", default: "default threshold", setting: "your setting" }[d.water_threshold_source];
+      const chip = d.water_low ? this._chip("Low", "bad") : this._chip("OK", "ok");
+      if (d.calibrated && typeof d.water_level_pct === "number") {
+        const pct = d.water_level_pct;
+        const use = [];
+        if (typeof d.water_used_ml === "number") use.push(`used today ${this._n(d.water_used_ml)} mL`);
+        if (typeof d.water_days_left === "number") use.push(`about ${this._n(d.water_days_left, 1)} days left (${this._n(d.water_avg_daily_ml)} mL/day)`);
+        water = `<div class="bar ${d.water_low ? "low" : ""}" role="progressbar" aria-label="Water level" aria-valuemin="0" aria-valuemax="100"
+          aria-valuenow="${Math.round(pct)}"><span class="fill" style="width:${pct}%"></span><i class="mark" style="left:${d.water_threshold}%"></i></div>
+          ${this._n(pct, 0)} % &middot; about ${this._n(d.water_ml)} mL ${chip}
+          <div class="muted">${use.length ? esc(use.join(" \u00b7 ")) + "<br>" : ""}low below ${Math.round(d.water_threshold)} % (${src})</div>`;
+      } else {
+        water = `${Math.round(d.water_weight)} g ${chip}
+          <div class="muted">low below ${Math.round(d.water_threshold)} g (${src}). Not calibrated: ${this._admin ? "press Calibrate water level for a level bar" : "an administrator can calibrate the level"}.</div>`;
+      }
     }
     let filter = `<span class="muted">unknown</span>`;
     let filterCls = "";
@@ -489,6 +543,7 @@ class PetsPanel extends HTMLElement {
       this._btn(d.light ? "Light off" : "Light on", "light", d, { extra: `data-on="${!d.light}"` }),
       this._btn("Reset filter", "reset_filter", d, { danger: d.filter_overdue === true }),
     ];
+    if (this._admin) acts.push(this._calBtn(d));
     return `<div class="box">${this._head(d)}<div class="rows">${rows}</div><div class="acts">${acts.join("")}</div></div>`;
   }
 
@@ -529,6 +584,324 @@ class PetsPanel extends HTMLElement {
     }
   }
 
+  // --- devices -----------------------------------------------------------------------
+  _devicesHtml() {
+    const devs = this._state.devices;
+    const blocked = this._state.blocked || [];
+    const cards = devs.map((d) => this._deviceCard(d)).join("");
+    const blockedBox = blocked.length
+      ? `<div class="box"><h2>Blocked devices</h2>
+          <p class="muted">The broker refuses these serial numbers, so they never show up here. Unblock one and it connects again the next time it retries (a minute or two, or after a power-cycle).</p>
+          ${blocked.map((b) => `<div class="row"><span class="k">${esc(b.serial_masked)}${b.model ? ` &middot; ${esc(b.model)}` : ""}${b.name ? ` &middot; ${esc(b.name)}` : ""}
+            <span class="muted"><br>${b.ts ? `blocked ${esc(this._when(b.ts))}` : "blocked"}${b.attempt_ts ? `; tried to connect ${esc(this._ago(b.attempt_ts))}` : ""}</span></span>
+            <span class="v"><button class="btn alt" data-act="dev-unblock" data-id="${esc(b.id)}">Unblock</button></span></div>`).join("")}</div>`
+      : "";
+    return `<div class="acts" style="margin-top:0"><button class="btn" data-act="guide">${this._guide ? "Close the guide" : "Add a device"}</button></div>
+      ${this._guide ? this._guideHtml() : ""}
+      ${devs.length ? `<div class="grid">${cards}</div>` : `<div class="box empty">No device has connected yet.${this._guide ? "" : " Press Add a device for the steps."}</div>`}
+      ${blockedBox}`;
+  }
+
+  _deviceCard(d) {
+    const seen = d.last_seen_ts ? `${esc(this._ago(d.last_seen_ts))} <span class="muted">(${esc(this._when(d.last_seen_ts))})</span>` : `<span class="muted">not since Home Assistant started</span>`;
+    const fw = d.firmware ? esc(d.firmware) + (d.hardware ? ` <span class="muted">(hardware ${esc(d.hardware)})</span>` : "") : `<span class="muted">unknown yet</span>`;
+    const rows = this._row("Model", `${esc(d.model_name)} <span class="muted">${esc(d.model)}</span>`)
+      + this._row("Serial", `<code>${esc(d.serial_masked)}</code>`)
+      + this._row("IP address", d.ip ? esc(d.ip) : `<span class="muted">unknown</span>`)
+      + this._row("Firmware", fw)
+      + this._row("Last seen", d.online ? "now" : seen)
+      + this._row("Connection", d.online ? this._chip("Connected", "ok") : this._chip("Not connected", "warn"));
+    const acts = [`<button class="btn alt" data-act="dev-rename" data-id="${esc(d.id)}">Rename</button>`];
+    if (d.kind === "fountain") acts.push(this._calBtn(d));
+    acts.push(`<button class="btn alt danger" data-act="dev-remove" data-id="${esc(d.id)}">Remove...</button>`);
+    return `<div class="box">${this._head(d)}<div class="rows">${rows}</div><div class="acts">${acts.join("")}</div></div>`;
+  }
+
+  _guideHtml() {
+    const dns = this._dnsHtml();
+    const fresh = this._state.devices.filter((d) => this._baseline && !this._baseline.has(d.id));
+    const coming = (this._state.connecting || []).map((c) => `<div class="notice info" style="margin-top:8px"><span class="spin" aria-hidden="true"></span>
+      A device at ${esc(c.ip)} (${esc(c.serial_masked)}) is connecting${c.model ? ` &middot; model ${esc(c.model)} is not supported yet` : "..."}</div>`).join("");
+    const got = fresh.map((d) => `<div class="notice" style="margin-top:8px;border-color:var(--success-color,#43a047)"><strong>Connected:</strong>
+      ${esc(d.name)} (${esc(d.model_name)}${d.ip ? `, ${esc(d.ip)}` : ""}). It is now in the list below.</div>`).join("");
+    const hostIp = this._dns?.local_ips?.[0] || "your Home Assistant's IP address";
+    const port = this._state.port;
+    return `<div class="box"><h2>Add a device</h2>
+      <ol class="guide">
+        <li>Set the device up on your Wi-Fi with the PetLibro app once, so it knows your Wi-Fi. You do not need the app or the cloud afterwards.</li>
+        <li>In your DNS server (AdGuard Home, Pi-hole or your router) rewrite <code>${esc(this._state.cloud_host || "mqtt.us.petlibro.com")}</code> to <code>${esc(hostIp)}</code>.</li>
+        <li>Make the device look the name up again: pause it on your router for about 2 minutes and unpause it, or power-cycle it.</li>
+      </ol>
+      <h3>DNS check</h3>${dns}
+      ${port && port !== 1883 ? `<div class="notice warn" style="margin-top:8px">The broker listens on port ${esc(port)}, but devices always dial port 1883: forward 1883 to ${esc(port)} on this host.</div>` : ""}
+      <div class="waiting" role="status"><span class="spin" aria-hidden="true"></span><span>Waiting for new devices... A device shows up here the moment it first connects.</span></div>
+      ${coming}${got}</div>`;
+  }
+
+  _dnsHtml() {
+    const r = this._dns;
+    const btn = `<div class="acts"><button class="btn alt" data-act="dns" ${r?.loading ? "disabled" : ""}>Check again</button></div>`;
+    if (!r || r.loading) return `<div class="muted"><span class="spin" aria-hidden="true"></span>Looking up the name...</div>`;
+    if (r.failed) return `<div class="notice bad">The check could not run: ${esc(r.failed)}</div>${btn}`;
+    const ips = (r.resolved || []).map(esc).join(", ");
+    const here = (r.local_ips || []).map(esc).join(", ");
+    const lines = {
+      ok: [`ok`, `${this._chip("OK", "ok")} <code>${esc(r.host)}</code> resolves to <strong>${ips}</strong>, which is this Home Assistant host.`],
+      other_lan: r.local_ips?.length
+        ? [`bad`, `${this._chip("Wrong address", "bad")} <code>${esc(r.host)}</code> resolves to <strong>${ips}</strong>, a different device on your network. This host is ${here}. Change the DNS rewrite.`]
+        : [`warn`, `${this._chip("Cannot tell", "warn")} <code>${esc(r.host)}</code> resolves to <strong>${ips}</strong>, but this host's own address could not be determined. Check that it is this machine's IP.`],
+      public: [`bad`, `${this._chip("Not rewritten", "bad")} <code>${esc(r.host)}</code> resolves to <strong>${ips}</strong>, an address outside your network (the PetLibro cloud). Add the DNS rewrite${here ? ` to ${here}` : ""}, or make this host use that DNS server.`],
+      unresolved: [`bad`, `${this._chip("No answer", "bad")} <code>${esc(r.host)}</code> does not resolve${r.error ? ` (${esc(r.error)})` : ""}. Add the DNS rewrite${here ? ` to ${here}` : ""}.`],
+    }[r.status] || ["warn", esc(r.status)];
+    return `<div class="notice ${lines[0] === "ok" ? "" : lines[0]}" ${lines[0] === "ok" ? 'style="border-color:var(--success-color,#43a047)"' : ""}>${lines[1]}</div>
+      <p class="muted">This is the answer Home Assistant's own resolver gets. Your devices ask your router's DNS server; if that is a different one, the real test is the device connecting below.</p>${btn}`;
+  }
+
+  _toggleGuide() {
+    this._guide = !this._guide;
+    if (this._guide) {
+      this._baseline = new Set(this._state.devices.map((d) => d.id));
+      this._checkDns();
+    }
+    this._render();
+  }
+
+  async _checkDns() {
+    this._dns = { loading: true };
+    this._render();
+    let res;
+    try {
+      res = await this._hass.callWS({ type: "petlibro_lan/dns_check" });
+    } catch (err) {
+      res = { failed: err?.message || "unknown error" };
+    }
+    this._dns = res;
+    if (this._tab === "devices") this._render();
+  }
+
+  async _renameDevice(id) {
+    const d = this._state.devices.find((x) => x.id === id);
+    if (!d) return;
+    const got = await this._dialog({
+      title: "Rename device",
+      body: `<label class="muted">Name<br><input type="text" id="rn" maxlength="60" value="${esc(d.name)}" autocomplete="off"></label>
+        <p class="muted">This is the device name in Home Assistant too. Clear it to go back to "${esc(d.model_name)} ${esc(d.serial_masked.slice(-4))}".</p>`,
+      confirm: "Rename",
+      collect: (ov) => ov.querySelector("#rn").value.trim(),
+    });
+    if (got === null) return;
+    if (await this._call({ type: "petlibro_lan/rename_device", serial: id, name: got }, "Renamed")) this._loadState();
+  }
+
+  async _removeDevice(id) {
+    const d = this._state.devices.find((x) => x.id === id);
+    if (!d) return;
+    const got = await this._dialog({
+      title: `Remove ${d.name}?`,
+      body: `<p>${esc(d.name)} is disconnected from Home Assistant and everything kept about it is deleted: its entities and device, calibration, water-use history and alert state${d.can_feed ? ", and the feeding schedule managed here" : ""}.
+        Nothing stored on the device itself changes.</p>
+        <div class="notice warn">If the device is <strong>still redirected</strong> to Home Assistant (the DNS rewrite), it <strong>comes back the next time it connects</strong>.
+        Undo the rewrite, or block it below.</div>
+        <label class="chk"><input type="checkbox" id="blk"><span>Block (ignore) this device
+        <span class="sub">The broker refuses its serial number until you unblock it on this tab.</span></span></label>`,
+      confirm: "Remove",
+      danger: true,
+      collect: (ov) => ({ block: ov.querySelector("#blk").checked }),
+    });
+    if (!got) return;
+    const res = await this._call({ type: "petlibro_lan/remove_device", serial: id, block: got.block },
+      got.block ? "Removed and blocked" : "Removed");
+    if (res) this._loadState();
+  }
+
+  async _unblock(id) {
+    if (await this._call({ type: "petlibro_lan/unblock_device", serial: id }, "Unblocked")) this._loadState();
+  }
+
+  // --- water-level calibration wizard -------------------------------------------------
+  _openWizard(id) {
+    const d = this._state.devices.find((x) => x.id === id);
+    if (!d || !this._isAdmin) return;
+    this._wiz = { id, step: "empty", busy: false, error: "", note: "", confirmReset: false, back: this._root.activeElement };
+    const ov = this._ov;
+    ov.onclick = (e) => this._wizClick(e);
+    ov.onkeydown = (e) => {
+      if (e.key === "Escape" && !this._wiz?.busy) this._closeWizard();
+    };
+    ov.onchange = (e) => {
+      if (e.target.id !== "wz-zero" || !this._wiz) return;
+      this._wiz.zeroOk = e.target.checked;
+      const btn = ov.querySelector('[data-w="zero"]');
+      if (btn) btn.disabled = !(e.target.checked && this._wizDev?.online);
+    };
+    ov.hidden = false;
+    this._wizRender();
+  }
+
+  _closeWizard() {
+    const back = this._wiz?.back;
+    this._wiz = null;
+    const ov = this._ov;
+    ov.hidden = true;
+    ov.innerHTML = "";
+    ov.onclick = ov.onkeydown = ov.onchange = null;
+    if (back && back.focus) back.focus();
+  }
+
+  get _wizDev() {
+    return this._wiz ? this._state.devices.find((x) => x.id === this._wiz.id) : null;
+  }
+
+  _wizLive() {
+    const el = this._ov.querySelector("#wzlive");
+    const d = this._wizDev;
+    if (!el || !d) return;
+    el.textContent = typeof d.water_weight === "number" ? `${this._n(d.water_weight, 1)} g` : "no reading yet";
+  }
+
+  _wizRender() {
+    const w = this._wiz;
+    const d = this._wizDev;
+    if (!w || !d) return this._closeWizard();
+    const cal = d.calibration || {};
+    const live = `<div class="live">Current reading: <strong id="wzlive">${typeof d.water_weight === "number" ? `${this._n(d.water_weight, 1)} g` : "no reading yet"}</strong>
+      <span class="muted">(updates about every 45 seconds)</span></div>`;
+    const busy = w.busy
+      ? `<div class="waiting" role="status"><span class="spin" aria-hidden="true"></span><span>Waiting for the next reading from the fountain (up to ${CAPTURE_SECONDS} seconds). Leave it alone until this finishes.</span></div>` : "";
+    const err = `<div class="err" role="alert">${esc(w.error)}</div>`;
+    const dis = w.busy ? "disabled" : "";
+    const offline = !d.online ? `<div class="notice warn">The fountain is not connected, so it cannot take a reading. You can still enter the weights by hand.</div>` : "";
+    let title = "Calibrate water level";
+    let body = "";
+    let acts = "";
+    if (w.step === "empty") {
+      body = `<div class="muted">Step 1 of 2</div>
+        <p><strong>Lift the reservoir off the base, or empty it</strong> (empty it and leave it on the base for the most accurate result), then press <strong>Capture empty</strong>.</p>
+        ${live}${offline}${busy}${err}
+        ${cal.empty_g != null ? `<p class="muted">Saved empty reading: ${this._n(cal.empty_g, 1)} g${cal.full_g != null ? `, full: ${this._n(cal.full_g, 1)} g` : ""}.</p>` : ""}`;
+      acts = `<button class="btn" data-w="capture-empty" ${dis || !d.online ? "disabled" : ""}>Capture empty</button>`
+        + (cal.empty_g != null ? `<button class="btn alt" data-w="to-full" ${dis}>Keep empty, capture full</button>` : "");
+    } else if (w.step === "full") {
+      body = `<div class="muted">Step 2 of 2</div>
+        ${w.note ? `<div class="notice info">${esc(w.note)}</div>` : ""}
+        <p><strong>Fill the reservoir to the MAX line and put it back</strong> on the base, then press <strong>Capture full</strong>. The full reading must be at least ${MIN_SPAN_G} g heavier than empty (${this._n(cal.empty_g ?? 0, 1)} g).</p>
+        ${live}${offline}${busy}${err}`;
+      acts = `<button class="btn" data-w="capture-full" ${dis || !d.online ? "disabled" : ""}>Capture full</button>
+        <button class="btn alt" data-w="back-empty" ${dis}>Back</button>`;
+    } else if (w.step === "done") {
+      title = "Water level calibrated";
+      body = `<p>Done. ${esc(d.name)} now reports its water level as a percentage and in mL.</p>
+        <div class="rows">${this._row("Empty", `${this._n(cal.empty_g, 1)} g`)}${this._row("Full", `${this._n(cal.full_g, 1)} g`)}
+        ${typeof d.water_level_pct === "number" ? this._row("Level now", `${this._n(d.water_level_pct, 0)} % (about ${this._n(d.water_ml)} mL)`) : ""}</div>
+        <p class="muted">Water low alerts now use a percentage (set it on the Alerts tab; default 25 %).</p>`;
+      acts = `<button class="btn" data-w="close">Close</button>`;
+    } else if (w.step === "manual") {
+      title = "Enter weights by hand";
+      body = `<p class="muted">Grams the scale shows with the reservoir empty and with it filled to the MAX line. Full must be at least ${MIN_SPAN_G} g more than empty.</p>
+        <div class="seg"><label class="muted">Empty (g)<br><input type="number" id="wz-empty" inputmode="decimal" min="0" max="20000" step="1"
+          value="${cal.empty_g ?? ""}"></label>
+        <label class="muted">Full (g)<br><input type="number" id="wz-full" inputmode="decimal" min="0" max="20000" step="1" value="${cal.full_g ?? ""}"></label></div>
+        ${err}`;
+      acts = `<button class="btn" data-w="save-manual" ${dis}>Save</button><button class="btn alt" data-w="back-empty" ${dis}>Back</button>`;
+    } else if (w.step === "advanced") {
+      title = "Zero the scale";
+      body = `<div class="notice bad"><strong>Advanced.</strong> This tells the fountain's scale that whatever is on it right now weighs <strong>nothing</strong>.
+        Remove the reservoir first; with it on the base the fountain refuses. Afterwards all weights shift, so redo the calibration.</div>
+        <label class="chk"><input type="checkbox" id="wz-zero" ${w.zeroOk ? "checked" : ""}><span>The reservoir is lifted off and I want to zero the scale.</span></label>${err}`;
+      acts = `<button class="btn danger" data-w="zero" ${w.zeroOk && !w.busy && d.online ? "" : "disabled"}>Zero scale</button><button class="btn alt" data-w="back-empty" ${dis}>Back</button>`;
+    }
+    let more = "";
+    if (w.step === "empty" || w.step === "full") {
+      more = w.confirmReset
+        ? `<div class="notice bad" style="margin-top:12px">Remove the calibration? The level bar goes away and alerts use grams again.
+            <div class="acts"><button class="btn danger" data-w="reset-yes" ${dis}>Reset calibration</button><button class="btn alt" data-w="reset-no" ${dis}>Keep it</button></div></div>`
+        : `<div class="acts" style="margin-top:12px">
+            <button class="link" data-w="manual" ${dis}>Enter weights by hand</button>
+            ${d.calibrated || cal.empty_g != null ? `<button class="link" data-w="reset" ${dis}>Reset calibration</button>` : ""}
+            <button class="link" data-w="advanced" ${dis}>Zero scale (advanced)</button></div>`;
+    }
+    const close = w.step === "done" ? "" : `<button class="btn alt" data-w="close" ${dis}>Close</button>`;
+    this._ov.innerHTML = `<div class="dlg wiz" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h2>${esc(title)} <span class="muted">${esc(d.name)}</span></h2>
+      <div class="dbody">${body}${more}</div><div class="dact">${close}${acts}</div></div>`;
+    const focus = this._ov.querySelector("input[type=number], .dact .btn:not([disabled]):not(.alt)") || this._ov.querySelector("button");
+    if (focus && focus.focus && !w.busy) focus.focus();
+  }
+
+  async _wizClick(e) {
+    const w = this._wiz;
+    if (!w) return;
+    if (e.target === this._ov) return w.busy ? undefined : this._closeWizard();
+    const b = e.target.closest("[data-w]");
+    if (!b || b.disabled) return;
+    const act = b.dataset.w;
+    const set = (patch) => {
+      Object.assign(w, { error: "", ...patch });
+      this._wizRender();
+    };
+    switch (act) {
+      case "close": return this._closeWizard();
+      case "to-full": return set({ step: "full", note: "" });
+      case "back-empty": return set({ step: "empty" });
+      case "manual": return set({ step: "manual" });
+      case "advanced": return set({ step: "advanced", zeroOk: false });
+      case "reset": return set({ confirmReset: true });
+      case "reset-no": return set({ confirmReset: false });
+      case "reset-yes": {
+        set({ busy: true });
+        const res = await this._call({ type: "petlibro_lan/calibration_reset", serial: w.id }, "Calibration removed");
+        this._applyDevice(res);
+        return set({ busy: false, confirmReset: false, step: "empty" });
+      }
+      case "capture-empty": case "capture-full": {
+        const which = act === "capture-empty" ? "empty" : "full";
+        set({ busy: true });
+        try {
+          const res = await this._hass.callWS({ type: "petlibro_lan/calibration_capture", serial: w.id, which });
+          this._applyDevice(res.device);
+          if (which === "empty") {
+            const dropped = res.dropped_full ? " The earlier full reading no longer fits and was removed." : "";
+            return set({ busy: false, step: "full", note: `Captured empty: ${this._n(res.grams, 1)} g.${dropped}` });
+          }
+          return set({ busy: false, step: "done" });
+        } catch (err) {
+          return set({ busy: false, error: err?.message || "The reading failed" });
+        }
+      }
+      case "save-manual": {
+        const empty = parseFloat(this._ov.querySelector("#wz-empty").value);
+        const full = parseFloat(this._ov.querySelector("#wz-full").value);
+        if (!Number.isFinite(empty) || !Number.isFinite(full)) return set({ error: "Enter both weights in grams." });
+        if (empty < 0 || full > 20000) return set({ error: "Weights must be between 0 and 20000 g." });
+        if (full < empty + MIN_SPAN_G) return set({ error: `Full must be at least ${MIN_SPAN_G} g heavier than empty.` });
+        set({ busy: true });
+        try {
+          const res = await this._hass.callWS({ type: "petlibro_lan/calibration_set", serial: w.id, empty_g: empty, full_g: full });
+          this._applyDevice(res);
+          return set({ busy: false, step: "done" });
+        } catch (err) {
+          return set({ busy: false, error: err?.message || "Could not save" });
+        }
+      }
+      case "zero": {
+        set({ busy: true });
+        try {
+          this._applyDevice(await this._hass.callWS({ type: "petlibro_lan/zero_scale", serial: w.id, confirm: true }));
+          this._toast("Scale zeroed. Redo the calibration.");
+          return set({ busy: false, step: "empty", zeroOk: false });
+        } catch (err) {
+          return set({ busy: false, error: err?.message || "The fountain did not accept it" });
+        }
+      }
+      default:
+    }
+  }
+
+  _applyDevice(dev) {
+    if (!dev) return;
+    const i = this._state.devices.findIndex((x) => x.id === dev.id);
+    if (i >= 0) this._state.devices[i] = dev;
+  }
+
   // --- dialog -------------------------------------------------------------------
   _dialog({ title, body, confirm = "OK", danger = false, check = null, collect = null }) {
     return new Promise((resolve) => {
@@ -545,7 +918,7 @@ class PetsPanel extends HTMLElement {
         const value = accepted ? (collect ? collect(ov) : true) : null;
         ov.hidden = true;
         ov.innerHTML = "";
-        ov.onclick = ov.onkeydown = ov.oninput = null;
+        ov.onclick = ov.onkeydown = ov.oninput = ov.onchange = null;
         if (back && back.focus) back.focus();
         resolve(value);
       };
@@ -784,8 +1157,10 @@ class PetsPanel extends HTMLElement {
       <div class="box"><h2>What to alert on</h2>
         ${row("food_low", "Food low", "The feeder's hopper sensor reports low food.", remind("food_low"))}
         ${row("water_low", "Water low", "Fountain water weight is below the threshold.",
-          `<label>Alert below ${this._num("alerts.water_low.threshold_g", a.water_low.threshold_g, 50, 20000, 10, hint)} g</label>${remind("water_low")}
-           <span class="muted">Leave empty to use the fountain's own low-water value.</span>`)}
+          `<label>Calibrated fountains: below ${this._num("alerts.water_low.threshold_pct", a.water_low.threshold_pct, 1, 99)} %</label>
+           <label>Others: below ${this._num("alerts.water_low.threshold_g", a.water_low.threshold_g, 50, 20000, 10, hint)} g</label>${remind("water_low")}
+           <span class="muted">The percent applies to fountains with a water-level calibration (Devices tab); the grams value to the rest.
+           Leave grams empty to use the fountain's own low-water value.</span>`)}
         ${row("filter_due", "Filter due", "Before the filter is due, and daily once it is overdue.",
           `<label>Warn ${this._num("alerts.filter_due.days_before", a.filter_due.days_before, 0, 60)} days before</label>
            <label>Overdue reminder at ${this._num("alerts.filter_due.remind_hour", a.filter_due.remind_hour, 0, 23)} :00</label>`)}
@@ -832,6 +1207,7 @@ class PetsPanel extends HTMLElement {
     for (const k of ["food_low", "water_low", "offline", "battery_low"]) {
       if (!whole(a[k].remind_hours, 0, 168)) return "Reminder hours must be 0-168.";
     }
+    if (!whole(a.water_low.threshold_pct, 1, 99)) return "Water: the percent threshold must be 1-99.";
     const t = a.water_low.threshold_g;
     if (t !== null && !(typeof t === "number" && t >= 50 && t <= 20000)) return "Water threshold must be 50-20000 g, or empty.";
     return "";
@@ -923,6 +1299,12 @@ class PetsPanel extends HTMLElement {
         this._draftA = JSON.parse(this._savedA);
         return this._render();
       case "test": return this._sendTest();
+      case "calibrate": return this._openWizard(target.dataset.id);
+      case "guide": return this._toggleGuide();
+      case "dns": return this._checkDns();
+      case "dev-rename": return this._renameDevice(target.dataset.id);
+      case "dev-remove": return this._removeDevice(target.dataset.id);
+      case "dev-unblock": return this._unblock(target.dataset.id);
       default:
     }
   }

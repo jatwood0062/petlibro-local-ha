@@ -439,3 +439,41 @@ def test_parse_forward():
     assert hosts.parse_forward("local-kamoer-kwc-se:1883") == ("local-kamoer-kwc-se", 1883)
     for bad in ("", "x", "a:0", "a:70000", "a b:1", "a:1:2", "h:p", None):
         assert hosts.parse_forward(bad) is None
+
+
+# --- block list and removal ---
+def test_blocked_serial_is_refused_with_not_authorized_and_others_still_connect():
+    async def go():
+        blocked, attempts = {SERIAL}, []
+        async with Harness(blocked=lambda c: c in blocked, on_blocked=lambda c, ip: attempts.append((c, ip))) as h:
+            for level in (4, 3):
+                c = await h.client()
+                assert await c.handshake(level=level) == b"\x20\x02\x00\x05"  # CONNACK, return code 5
+                assert await c.closed()
+            assert [a[0] for a in attempts] == [SERIAL, SERIAL] and h.connected == [] and h.gone == []
+            assert not h.broker.is_connected(SERIAL)
+            other = await h.client()
+            assert await other.handshake(client_id=OTHER) == b"\x20\x02\x00\x00"
+            blocked.clear()  # unblocked: the device is let in at its next attempt
+            c = await h.client()
+            assert await c.handshake() == b"\x20\x02\x00\x00"
+            assert [c for c, _ in h.connected] == [OTHER, SERIAL]
+    run(go())
+
+
+def test_disconnect_drops_a_client_without_reporting_it_gone():
+    async def go():
+        async with Harness() as h:
+            c = await h.client()
+            assert await c.handshake() == b"\x20\x02\x00\x00"
+            await c.send(subscribe(t(SERIAL, "service", "sub")))
+            await c.recv(5)
+            assert h.broker.disconnect(SERIAL) is True
+            assert await c.closed()
+            assert h.broker.disconnect(SERIAL) is False
+            await asyncio.sleep(0.1)
+            assert h.gone == [] and not h.broker.is_connected(SERIAL)
+            assert await h.broker.publish(SERIAL, t(SERIAL, "service", "sub"), b"x") is False
+            c2 = await h.client()  # it may reconnect (the hub decides what to do with it)
+            assert await c2.handshake() == b"\x20\x02\x00\x00"
+    run(go())

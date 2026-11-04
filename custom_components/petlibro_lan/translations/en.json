@@ -104,6 +104,15 @@
       },
       "ip_address": {
         "name": "IP address"
+      },
+      "water_remaining": {
+        "name": "Water remaining"
+      },
+      "water_used_today": {
+        "name": "Water used today"
+      },
+      "water_days_left": {
+        "name": "Water days left"
       }
     },
     "switch": {

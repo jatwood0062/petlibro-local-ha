@@ -266,6 +266,20 @@ def parse_attrs(msg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def water_samples(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """The sample dicts of a WATER_CAP_EVENT (oldest first); tolerates a flat message without the list."""
+    content = msg.get("content")
+    samples = [s for s in content if isinstance(s, dict)] if isinstance(content, list) else []
+    if not samples and "weight" in msg:
+        samples = [msg]
+    return samples
+
+
+def water_weights(msg: dict[str, Any]) -> list[float]:
+    """Every valid scale reading (grams) in a WATER_CAP_EVENT, oldest first."""
+    return [float(w) for s in water_samples(msg) if (w := _num(s.get("weight"))) is not None]
+
+
 def parse_message(channel: str, msg: dict[str, Any], now: int) -> dict[str, Any]:
     """Flat updates from one device message; merge them, never replace the state.
 
@@ -297,11 +311,7 @@ def parse_message(channel: str, msg: dict[str, Any], now: int) -> dict[str, Any]
                 if expect is not None:
                     out["feed_blocked"] = actual < expect
     elif cmd == "WATER_CAP_EVENT":
-        content = msg.get("content")
-        samples = [s for s in content if isinstance(s, dict)] if isinstance(content, list) else []
-        if not samples and "weight" in msg:  # tolerate a flat message without the sample list
-            samples = [msg]
-        if samples:
+        if samples := water_samples(msg):
             last = samples[-1]
             if (val := _num(last.get("weight"))) is not None:
                 out["water_weight"] = val

@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTime, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -56,8 +56,6 @@ FEEDER_SENSORS = (
 FOUNTAIN_SENSORS = (
     Desc(key="water_weight", device_class=SensorDeviceClass.WEIGHT, native_unit_of_measurement=UnitOfMass.GRAMS,
          state_class=SensorStateClass.MEASUREMENT, value=lambda d: d.get("water_weight")),
-    Desc(key="water_level", native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
-         value=lambda d: d.get("water_percent")),
     Desc(key="filter_days", native_unit_of_measurement=UnitOfTime.DAYS, value=_filter_days),
 )
 
@@ -72,6 +70,38 @@ class PetlibroSensor(PetlibroEntity, SensorEntity):
         return self.entity_description.value(self.data)
 
 
+@dataclass(frozen=True, kw_only=True)
+class WaterDesc(SensorEntityDescription):
+    value: Callable[[dict[str, Any], dict[str, Any]], Any]  # (device data, hub.water_info)
+
+
+WATER_SENSORS = (
+    # calibrated: position between the empty and full readings; otherwise the device's own (unreliable) percent
+    WaterDesc(key="water_level", native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
+              value=lambda d, w: w["level_pct"] if w["calibrated"] else d.get("water_percent")),
+    WaterDesc(key="water_remaining", device_class=SensorDeviceClass.VOLUME_STORAGE,
+              native_unit_of_measurement=UnitOfVolume.MILLILITERS, state_class=SensorStateClass.MEASUREMENT,
+              value=lambda d, w: w["remaining_ml"]),
+    WaterDesc(key="water_used_today", native_unit_of_measurement=UnitOfVolume.MILLILITERS,
+              state_class=SensorStateClass.TOTAL_INCREASING, value=lambda d, w: w["used_today_ml"]),
+    WaterDesc(key="water_days_left", native_unit_of_measurement=UnitOfTime.DAYS, value=lambda d, w: w["days_left"]),
+)
+
+
+class PetlibroWaterSensor(PetlibroEntity, SensorEntity):
+    """Fountain water level, volume, use and days left (the last three need a water-level calibration)."""
+
+    def __init__(self, hub, serial, desc: WaterDesc) -> None:
+        super().__init__(hub, serial, desc.key)
+        self.entity_description = desc
+
+    @property
+    def native_value(self) -> Any:
+        if self.serial not in self.hub.devices:
+            return None
+        return self.entity_description.value(self.data, self.hub.water_info(self.serial))
+
+
 class FeedsToday(PetlibroEntity, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
 
@@ -80,8 +110,8 @@ class FeedsToday(PetlibroEntity, SensorEntity):
 
     @property
     def native_value(self) -> int:
-        dev = self.hub.devices[self.serial]
-        return dev.feeds_today if dev.feeds_day == dt_util.now().date() else 0
+        dev = self.hub.devices.get(self.serial)
+        return dev.feeds_today if dev is not None and dev.feeds_day == dt_util.now().date() else 0
 
 
 class FeedingPlan(PetlibroEntity, SensorEntity):
@@ -114,7 +144,8 @@ class IpAddress(PetlibroEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return self.hub.devices[self.serial].ip
+        dev = self.hub.devices.get(self.serial)
+        return dev.ip if dev is not None else None
 
 
 def _make(hub, serial, kind):
@@ -129,6 +160,7 @@ def _make(hub, serial, kind):
         descs += FOUNTAIN_SENSORS
         if info.battery:
             descs.append(BATTERY)
+        out += [PetlibroWaterSensor(hub, serial, d) for d in WATER_SENSORS]
     return out + [PetlibroSensor(hub, serial, d) for d in descs]
 
 

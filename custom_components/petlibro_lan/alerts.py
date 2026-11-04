@@ -10,6 +10,8 @@ Assumptions (also in the README):
 * Water low is ``water_weight`` (grams, from WATER_CAP_EVENT) below a threshold: the user's own
   threshold if set, else the device's ``lowWater`` when that is a plausible gram value
   (100-5000), else 500 g. The device's unit for ``lowWater`` is not confirmed.
+* With a water-level calibration (empty and full readings, see calibration.py) water low compares the
+  level in percent with ``threshold_pct`` (default 25 %); without one the gram rules above apply.
 * The filter is due on ``filterNextReplacementTimestamp`` (epoch ms).
 """
 from __future__ import annotations
@@ -21,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+from . import calibration
+
 HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 TARGET_RE = re.compile(r"^(?:service:[a-z0-9_]{1,128}|entity:notify\.[a-z0-9_]{1,128})$")
 MAX_TARGETS = 20
@@ -31,6 +35,8 @@ URGENT = frozenset({"feed_failed", "food_low", "water_low"})  # not held back by
 DEFAULT_WATER_LOW_G = 500
 WATER_PLAUSIBLE = (100, 5000)  # grams a fountain's own low-water value must fall in to be trusted
 WATER_HYSTERESIS = 1.05  # a low-water alert clears 5 % above its threshold
+DEFAULT_WATER_LOW_PCT = 25  # calibrated fountains: alert below this level
+WATER_HYST_PCT = 3  # percentage points above the percent threshold before a calibrated alert clears
 BATTERY_HYSTERESIS = 5  # percentage points
 RESOLVE_DELAY = 120  # seconds a condition must stay clear before the alert is resolved
 SUMMARY_MAX_LATE = 6 * 3600
@@ -41,7 +47,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "quiet": {"enabled": False, "start": "22:00", "end": "07:00"},
     "alerts": {
         "food_low": {"enabled": True, "remind_hours": 12},
-        "water_low": {"enabled": True, "threshold_g": None, "remind_hours": 12},
+        "water_low": {"enabled": True, "threshold_g": None, "threshold_pct": DEFAULT_WATER_LOW_PCT, "remind_hours": 12},
         "filter_due": {"enabled": True, "days_before": 3, "remind_hour": 9},
         "offline": {"enabled": True, "minutes": 30, "remind_hours": 24},
         "feed_failed": {"enabled": True},
@@ -54,7 +60,7 @@ _INT_RANGES = {  # (alert, key): (min, max)
     ("food_low", "remind_hours"): (0, 168), ("water_low", "remind_hours"): (0, 168),
     ("offline", "remind_hours"): (0, 168), ("battery_low", "remind_hours"): (0, 168),
     ("filter_due", "days_before"): (0, 60), ("filter_due", "remind_hour"): (0, 23),
-    ("offline", "minutes"): (5, 1440), ("battery_low", "percent"): (1, 99),
+    ("offline", "minutes"): (5, 1440), ("battery_low", "percent"): (1, 99), ("water_low", "threshold_pct"): (1, 99),
 }
 
 
@@ -149,11 +155,33 @@ def water_threshold(data: dict[str, Any], override: float | None = None) -> tupl
     return float(DEFAULT_WATER_LOW_G), "default"
 
 
-def water_low(data: dict[str, Any], override: float | None = None) -> bool | None:
+@dataclass(frozen=True)
+class WaterCheck:
+    low: bool
+    limit: float  # the threshold, in ``unit``
+    unit: str  # "%" (calibrated) or "g"
+    source: str  # grams: "user", "device" or "default"; percent: "setting"
+    level: float | None  # percent, only when calibrated
+
+
+def water_check(data: dict[str, Any], override: float | None = None, cal: dict[str, Any] | None = None,
+                pct: float | None = None, active: bool = False) -> WaterCheck | None:
+    """Is the water low? ``active`` widens the margin (hysteresis) for an alert that is already raised."""
     weight = data.get("water_weight")
     if not isinstance(weight, (int, float)) or isinstance(weight, bool):
         return None
-    return weight < water_threshold(data, override)[0]
+    if calibration.usable(cal):
+        limit = float(DEFAULT_WATER_LOW_PCT if pct is None else pct)
+        level = calibration.level_percent(weight, cal)
+        return WaterCheck(level < limit + (WATER_HYST_PCT if active else 0), limit, "%", "setting", level)
+    limit, source = water_threshold(data, override)
+    return WaterCheck(weight < limit * (WATER_HYSTERESIS if active else 1), limit, "g", source, None)
+
+
+def water_low(data: dict[str, Any], override: float | None = None, cal: dict[str, Any] | None = None,
+              pct: float | None = None) -> bool | None:
+    check = water_check(data, override, cal, pct)
+    return None if check is None else check.low
 
 
 def filter_days_left(data: dict[str, Any], now: float) -> float | None:
@@ -211,14 +239,21 @@ def _cond_food(dev: Device, cfg: dict, st: dict | None, now: float, local: datet
 
 def _cond_water(dev: Device, cfg: dict, st: dict | None, now: float, local: datetime) -> Cond | None:
     data = dev["data"]
-    if dev["kind"] != "fountain" or not dev["online"] or not isinstance(data.get("water_weight"), (int, float)):
+    if dev["kind"] != "fountain" or not dev["online"]:
         return None
-    limit, _src = water_threshold(data, cfg.get("threshold_g"))
-    weight = data["water_weight"]
-    bad = weight < limit * (WATER_HYSTERESIS if st and st["active"] else 1)
-    n = dev["name"]
-    return Cond(bad, f"{n}: water low",
-                f"{n} water is low ({weight:.0f} g, alert below {limit:.0f} g). Refill the reservoir.",
+    cal = dev.get("calibration")
+    check = water_check(data, cfg.get("threshold_g"), cal, cfg.get("threshold_pct"), bool(st and st["active"]))
+    if check is None:
+        return None
+    weight, n = data["water_weight"], dev["name"]
+    if check.unit == "%":
+        ml = calibration.remaining_ml(weight, cal)
+        return Cond(check.low, f"{n}: water low",
+                    f"{n} water is low ({check.level:.0f} %, about {ml:.0f} mL; alert below {check.limit:.0f} %). "
+                    "Refill the reservoir.",
+                    f"{n} water is back to {check.level:.0f} %.")
+    return Cond(check.low, f"{n}: water low",
+                f"{n} water is low ({weight:.0f} g, alert below {check.limit:.0f} g). Refill the reservoir.",
                 f"{n} water is back to {weight:.0f} g.")
 
 
@@ -396,7 +431,8 @@ def _summary(settings: dict, state: dict, devices: list[Device], now: float, loc
 
 def summary_text(devices: list[Device], now: float, local: datetime, settings: dict[str, Any]) -> str:
     lines = []
-    override = settings["alerts"]["water_low"].get("threshold_g")
+    wcfg = settings["alerts"]["water_low"]
+    override = wcfg.get("threshold_g")
     for dev in devices:
         d, n = dev["data"], dev["name"]
         if not dev["online"]:
@@ -411,7 +447,12 @@ def summary_text(devices: list[Device], now: float, local: datetime, settings: d
         else:
             bits = []
             if isinstance(d.get("water_weight"), (int, float)):
-                bits.append(f"water {d['water_weight']:.0f} g" + (" (low)" if water_low(d, override) else ""))
+                cal, low = dev.get("calibration"), water_low(d, override, dev.get("calibration"), wcfg.get("threshold_pct"))
+                if calibration.usable(cal):
+                    bits.append(f"water {calibration.level_percent(d['water_weight'], cal):.0f} % "
+                                f"({calibration.remaining_ml(d['water_weight'], cal):.0f} mL)" + (" (low)" if low else ""))
+                else:
+                    bits.append(f"water {d['water_weight']:.0f} g" + (" (low)" if low else ""))
             if (days := filter_days_left(d, now)) is not None:
                 bits.append("filter overdue" if days <= 0 else f"filter in {_plural(math.ceil(days), 'day')}")
             if dev.get("battery") and isinstance(d.get("battery"), (int, float)):

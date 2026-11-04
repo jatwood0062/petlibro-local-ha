@@ -49,3 +49,8 @@ def model_info(model: str, serial: str = "") -> ModelInfo | None:
     if serial.startswith("WF"):
         return ModelInfo(f"Fountain {model}", FOUNTAIN)
     return None
+
+
+def mask_serial(serial: str) -> str:
+    """A serial for display: everything but the last four characters hidden."""
+    return "*" * max(0, len(serial) - 4) + serial[-4:]

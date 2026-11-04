@@ -16,7 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.storage import Store
 from homeassistant.loader import async_get_integration
 
-from . import websocket
+from . import calibration, websocket
 from .const import (
     ALERT_STORE_KEY,
     DOMAIN,
@@ -121,6 +121,27 @@ async def _reload(hass: HomeAssistant, entry: PetlibroConfigEntry) -> None:
 async def async_remove_entry(hass: HomeAssistant, entry: PetlibroConfigEntry) -> None:
     await Store(hass, STORE_VERSION, DOMAIN).async_remove()
     await Store(hass, STORE_VERSION, ALERT_STORE_KEY).async_remove()
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: PetlibroConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """The "Delete" button on a device's page: forget the device and everything stored about it.
+
+    A device that is still redirected to Home Assistant reappears the next time it connects
+    (block it from the Pets app's Devices tab to prevent that).
+    """
+    hub = getattr(entry, "runtime_data", None)
+    for domain, serial in device_entry.identifiers:
+        if domain != DOMAIN:
+            continue
+        if isinstance(hub, PetlibroHub):
+            hub.forget_device(serial)  # the device registry entry itself is removed by the caller
+        else:  # the entry is not loaded: clean the store directly so the device does not come back on load
+            store = Store(hass, STORE_VERSION, DOMAIN)
+            if isinstance(saved := await store.async_load(), dict):
+                await store.async_save(calibration.purge_serial(saved, serial))
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PetlibroConfigEntry) -> bool:

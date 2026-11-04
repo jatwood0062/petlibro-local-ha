@@ -17,7 +17,7 @@ so it can be installed next to the cloud `petlibro` integration.
 | Polar wet-food feeder, Granary Camera Feeder | PLAF109, PLAF203 | sensors only |
 | Dockstream 2 / Cordless / RFID fountains | PLWF106, PLWF116, PLWF305 | pump, light, water, filter |
 
-All of them also appear in the **Pets** sidebar app (overview, feeding schedule editor, alerts).
+All of them also appear in the **Pets** sidebar app (overview, feeding schedule editor, alerts, devices).
 
 ## Setup
 
@@ -43,8 +43,9 @@ devices, but they reconnect on their own.
 Feeder: Feed now (button), Portions for feed now (number), Food low, Dispenser blocked, Battery,
 Power source, Wi-Fi signal, Last feed, Last feed portions, Feeds today, Feeding plan (state = next
 feed, attributes = list), Indicator light and Button lock (switches). Fountain: Pump, Light,
-Water weight, Water level, Water low, Filter remaining, Filter due, Reset filter, Zero scale (disabled by
-default; remove the reservoir first). Every device also has Connected and an IP address
+Water weight, Water level, Water remaining, Water used today, Water days left, Water low, Filter remaining,
+Filter due, Reset filter, Zero scale (disabled by default; remove the reservoir first). Water remaining, used and
+days left need a water-level calibration (see "Water-level calibration"). Every device also has Connected and an IP address
 (diagnostic). Devices become unavailable after 5 minutes without a message.
 
 "Dispenser blocked" is inferred (fewer portions dispensed than requested, or error 2032), not a
@@ -81,9 +82,10 @@ by the integration (no build step, no extra card or resource), follows your them
   app, so the first Save replaces it completely; the app warns you and asks you to tick a box and confirm. Nothing is
   ever sent until you press Save. "Clear schedule" (typed `CLEAR`) is the only way an empty schedule is sent; saving a
   schedule with no enabled meal is refused. Times are Home Assistant's time zone (see "Feeding plans").
+- **Devices** (administrators): see "Devices tab" below.
 - **Alerts**: choose where alerts go (any `notify.*` service, including the Companion app `notify.mobile_app_*`, and
   any notify entity) and whether to also show a Home Assistant notification, then switch alerts on and tune them:
-  food low, water low (grams), filter due (N days before, default 3, and daily at 09:00 once overdue), device offline
+  food low, water low (percent for calibrated fountains, grams for the rest), filter due (N days before, default 3, and daily at 09:00 once overdue), device offline
   for more than N minutes (default 30), feed failed or dispenser blocked, fountain battery below N % (default 20),
   and an optional daily summary. Quiet hours hold back non-urgent pushes (filter, battery, offline, summary); feed
   failed, food low and water low always go through, and the Home Assistant notification is still created. "Send test
@@ -109,10 +111,54 @@ trigger:
 # types: food_low, water_low, filter_due, offline, feed_failed, battery_low, daily_summary
 ```
 
+### Devices tab
+
+Lists every device Home Assistant knows, connected or not: name, model, serial (only the last four characters),
+IP address, firmware, last seen and connection state.
+
+- **Rename** sets the device name in Home Assistant's device registry (clear it to return to the default name).
+- **Remove** asks for confirmation, disconnects the device from the broker and deletes everything stored about it:
+  its device and entities, calibration, water-use history, feeding schedule managed here and alert state. Nothing
+  stored on the device itself changes. If the device is **still redirected** to Home Assistant it appears again
+  the next time it connects, so the dialog offers **Block (ignore) this device**: the broker then answers its
+  connection with CONNACK 5 (not authorized). Blocked devices are listed at the bottom of the tab with an
+  **Unblock** button, which also shows when a blocked device last tried to connect. The device page's own
+  "Delete" button in Home Assistant removes the stored data too.
+- **Add a device** shows the steps (set the device up on Wi-Fi with the PetLibro app once; rewrite
+  `mqtt.us.petlibro.com` to this host's IP in your DNS; pause the device on your router for about two minutes or
+  power-cycle it), a **DNS check**, and a live "Waiting for new devices..." indicator that lists a device while it
+  connects and announces it the moment it has connected. The DNS check asks Home Assistant's own resolver and
+  compares the answer with this host's private IPv4 addresses (green: it points here; red: another host, an
+  internet address, or no answer). Your devices use your router's DNS, so if that differs from Home Assistant's the
+  real test is the device connecting.
+
+### Water-level calibration
+
+The fountain's own percentage is unreliable (the Dockstream 2 Cordless stays at one value all day), so the app
+calibrates from the scale's weight. Open **Calibrate water level** on a fountain card (Overview or Devices):
+
+1. Empty the reservoir (or lift it off the base) and press **Capture empty**.
+2. Fill it to the MAX line, put it back and press **Capture full**.
+
+Each capture waits for the fountain's next reading (about every 45 seconds, up to 60 s) and averages its samples.
+Full must be at least 300 g heavier than empty. You can also type both weights by hand, **Reset calibration**, or
+use the advanced **Zero scale** step (the scale then reads nothing for what is on it: lift the reservoir off first
+and redo the calibration afterwards).
+
+With a calibration, **Water level** is `(weight - empty) / (full - empty)`, clamped to 0-100 %; **Water remaining**
+is the weight above empty in mL (1 g of water is about 1 mL). **Water used today** adds up the decreases between
+readings (jitter under 10 g is ignored), skips refills (a rise of 150 g or more) and lifting the reservoir off (a
+sudden drop of 300 g or more), and resets at midnight. **Water days left** is remaining water divided by the
+average use of the last three complete days (it needs at least one). The Overview card shows a level bar with the
+alert threshold marked. Without a calibration nothing changes: Water level keeps the device's own percentage and
+the other three read unknown.
+
 ### Assumptions to know about
 
 - **Food low** is the inverse of the feeder's `surplusGrain` flag (true means food present).
-- **Water low** needs a weight (grams, sent by the fountain every ~45 s). It is low when below, in order: the
+- **Water low** of a **calibrated** fountain is the level in percent below the threshold in the Alerts tab (default
+  25 %; it clears 3 points above). For an uncalibrated one it needs a weight (grams, sent by the fountain every
+  ~45 s) and is low when below, in order: the
   threshold you set in the Alerts tab; the fountain's own `lowWater` value, if it looks like grams (100-5000); else
   500 g. What unit `lowWater` really uses is not confirmed (one fountain reports 1649), so check the "low below"
   line on the card and set your own threshold if it looks wrong. The percent value is not used (unreliable on the
@@ -165,6 +211,11 @@ redact serials, MAC addresses and IPs.
 PYTHONPATH=<dir with pytest> python3 -m pytest tests -q
 ```
 Tests need no Home Assistant installation.
+
+Websocket API (all under `petlibro_lan/`, writes need an administrator): `state`, `subscribe`, `get_schedule`,
+`set_schedule`, `clear_schedule`, `get_alerts`, `set_alerts`, `notify_targets`, `test_notification`, `command`,
+`dns_check`, `rename_device`, `remove_device`, `block_device`, `unblock_device`, `calibration_capture`,
+`calibration_set`, `calibration_reset`, `zero_scale`.
 
 ## Credits
 

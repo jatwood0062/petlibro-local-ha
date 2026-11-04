@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.0]
+
+- **Devices tab** in the Pets app (administrators): every known device, connected or not, with name, model, masked
+  serial (last 4 shown), IP, firmware, last seen and connection state. **Rename** (sets the device registry
+  `name_by_user`), **Remove** (confirmation; disconnects it from the broker and deletes its stored state, schedule,
+  calibration, water history, alert state, device and entities) and **Block (ignore)**: a blocked serial gets
+  CONNACK 5 (not authorized) from the broker until it is unblocked in the "Blocked devices" list. The block list is
+  stored with the other data. Home Assistant's own device page "Delete" now works too
+  (`async_remove_config_entry_device`). A removed device that is still redirected to Home Assistant reappears when
+  it next connects; the app says so.
+- **Add a device** guide: set up on Wi-Fi with the PetLibro app once, DNS rewrite, pause or power-cycle. A live
+  "Waiting for new devices..." indicator shows devices that are connecting and the moment one has connected, and a
+  **DNS check** resolves `mqtt.us.petlibro.com` (off the event loop) and compares it with this host's LAN addresses
+  (green/red, with the address it resolves to). New dependency: `network`.
+- **Fountain water-level calibration**: a wizard (Overview card or Devices tab) captures the empty and full weights
+  (the average of the next water reading, waits up to 60 s) with validation (full at least 300 g above empty), or
+  takes them by hand; Reset calibration; an advanced, warned "Zero scale" step. Stored per device.
+- With a calibration: **Water level** is the position between empty and full (0-100 %); new sensors **Water
+  remaining** (mL), **Water used today** (mL; decreases are summed, refills of 150 g or more and lifting the
+  reservoir off are ignored) and **Water days left** (3-day average). Without one, Water level keeps the device's
+  own percent as before. Overview cards show a level bar.
+- **Water low alert** is a percentage (default 25 %, 3-point hysteresis) for calibrated fountains; the grams rules
+  are unchanged for the others. Old alert settings load unchanged (`threshold_pct` defaults to 25).
+- Websocket commands: `dns_check`, `rename_device`, `remove_device`, `block_device`, `unblock_device`,
+  `calibration_capture`, `calibration_set`, `calibration_reset`, `zero_scale` (all admin only). The `state` and
+  `subscribe` results carry `blocked`, `connecting` and `port` for administrators.
+- Tests for calibration math, consumption and refill detection, the broker block list and disconnect, settings
+  and stored-data migration, DNS classification.
+
 ## [0.2.0]
 
 - New **Pets** sidebar app (`/petlibro-local`, icon `mdi:paw`; registered when the entry loads, removed when it

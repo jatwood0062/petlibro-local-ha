@@ -11,7 +11,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SIGNAL_NEW_DEVICE, SIGNAL_UPDATE
+from .const import DOMAIN, SIGNAL_DEVICE_REMOVED, SIGNAL_NEW_DEVICE, SIGNAL_UPDATE
 from .hub import PetlibroHub
 from .models import FEEDER, FOUNTAIN
 
@@ -39,7 +39,8 @@ class PetlibroEntity(Entity):
 
     @property
     def data(self) -> dict[str, Any]:
-        return self.hub.devices[self.serial].data
+        dev = self.hub.devices.get(self.serial)  # gone for a moment while the device is being removed
+        return dev.data if dev is not None else {}
 
     @property
     def available(self) -> bool:
@@ -75,7 +76,13 @@ def setup_entities(
 
     for serial in list(hub.devices):
         add_device(serial)
+
+    @callback
+    def forget_device(serial: str) -> None:
+        done.discard(serial)  # a removed device that connects again gets new entities
+
     entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_NEW_DEVICE, add_device))
+    entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_DEVICE_REMOVED, forget_device))
 
 
 __all__ = ["FEEDER", "FOUNTAIN", "PetlibroEntity", "setup_entities"]

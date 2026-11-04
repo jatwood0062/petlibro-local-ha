@@ -17,12 +17,16 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import alerts as alertlib
+from . import calibration as callib
 from . import plans as planlib
 from . import protocol
 from .broker import Broker
 from .const import (
     AVAILABILITY_TIMEOUT,
+    CAPTURE_TIMEOUT,
+    CLOUD_HOST,
     COMMAND_TIMEOUT,
+    CONSUMPTION_SAVE,
     CONF_PORT,
     CONF_TLS_FORWARD,
     DEFAULT_PORT,
@@ -33,12 +37,13 @@ from .const import (
     POLL_INTERVAL,
     FILTER_LIFE_DAYS,
     SIGNAL_ANY,
+    SIGNAL_DEVICE_REMOVED,
     SIGNAL_NEW_DEVICE,
     SIGNAL_UPDATE,
     STORE_VERSION,
 )
-from .hosts import parse_forward
-from .models import FEEDER, FOUNTAIN, ModelInfo, model_info
+from .hosts import classify_dns, is_lan_ipv4, parse_forward, resolve_ipv4
+from .models import FEEDER, FOUNTAIN, ModelInfo, mask_serial, model_info
 from .notifier import AlertManager
 from .state import DeviceState
 
@@ -56,11 +61,19 @@ class PetlibroHub:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
+        self.blocked: dict[str, dict[str, Any]] = {}  # serials the broker refuses: {model, name, ts}
         self.broker = Broker(
             self._on_publish, self._on_connect, self._on_disconnect,
             port=entry.options.get(CONF_PORT, DEFAULT_PORT),
             tls_forward=parse_forward(entry.options.get(CONF_TLS_FORWARD, "")),
+            blocked=lambda serial: serial in self.blocked, on_blocked=self._on_blocked,
         )
+        self.calibration: dict[str, dict[str, float]] = {}  # fountains: empty_g / full_g (+ timestamps)
+        self.consumption: dict[str, callib.Consumption] = {}
+        self._connecting: dict[str, dict[str, Any]] = {}  # connected, nothing published yet: {ip, ts, model}
+        self._blocked_seen: dict[str, tuple[str, float]] = {}  # last refused attempt: (ip, epoch s)
+        self._water_waiters: dict[str, list[asyncio.Future]] = {}
+        self._consumption_saved = 0.0
         self.devices: dict[str, DeviceState] = {}
         self.plans: dict[str, list[dict[str, Any]]] = {}  # only devices with a user-configured plan
         self.feed_portions: dict[str, int] = {}
@@ -94,6 +107,9 @@ class PetlibroHub:
                     self.plans[serial] = planlib.normalize(stored, info.max_portions)
                 except ValueError:
                     _LOGGER.warning("Ignoring invalid stored feeding plan for %s", _mask(serial))
+        self.blocked = callib.load_blocked(saved.get("blocked"))
+        self.calibration = {s: c for s, c in callib.load_calibrations(saved.get("calibration")).items() if s in self.devices}
+        self.consumption = {s: c for s, c in callib.load_consumption(saved.get("consumption")).items() if s in self.devices}
         await self.alerts.async_load()  # before the broker: a device update must not evaluate default settings
         try:
             await self.broker.start()
@@ -112,7 +128,11 @@ class PetlibroHub:
         await self._store.async_save(self._snapshot())
 
     def _snapshot(self) -> dict[str, Any]:
-        return {"devices": {s: {"model": d.model} for s, d in self.devices.items()}, "plans": self.plans}
+        return {
+            "devices": {s: {"model": d.model} for s, d in self.devices.items()}, "plans": self.plans,
+            "blocked": self.blocked, "calibration": self.calibration,
+            "consumption": {s: c.to_dict() for s, c in self.consumption.items()},
+        }
 
     def _save(self) -> None:
         self._store.async_delay_save(self._snapshot, SAVE_DELAY)
@@ -150,12 +170,22 @@ class PetlibroHub:
         if (dev := self.devices.get(serial)) is not None:
             dev.ip = ip
             self._signal(serial)
+        else:  # the Devices tab shows it while it introduces itself
+            self._connecting[serial] = {"ip": ip, "ts": time.time(), "model": None}
+            async_dispatcher_send(self.hass, SIGNAL_ANY)
 
     def _on_disconnect(self, serial: str) -> None:
         _LOGGER.debug("PetLibro device %s disconnected", serial)
+        if self._connecting.pop(serial, None) is not None:
+            async_dispatcher_send(self.hass, SIGNAL_ANY)
         if serial in self._online:
             self._online.discard(serial)
             self._signal(serial)
+
+    def _on_blocked(self, serial: str, ip: str) -> None:
+        _LOGGER.debug("Refused blocked PetLibro device %s from %s", _mask(serial), ip)
+        self._blocked_seen[serial] = (ip, time.time())
+        async_dispatcher_send(self.hass, SIGNAL_ANY)
 
     def _on_publish(self, serial: str, topic: str, payload: bytes) -> None:
         _LOGGER.debug("RX %s: %s", topic, payload[:RAW_LOG_LIMIT])
@@ -165,12 +195,17 @@ class PetlibroHub:
         if (msg := protocol.decode(payload)) is None:
             _LOGGER.debug("Ignoring non-JSON message on %s", topic)
             return
+        if serial in self.blocked:
+            return
         dev = self.devices.get(serial)
         if dev is None:
             if model_info(parsed.model, serial) is None:
                 _LOGGER.warning("Ignoring unknown PetLibro device %s (model %s)", _mask(serial), parsed.model)
+                if serial in self._connecting:
+                    self._connecting[serial]["model"] = parsed.model
                 return
             dev = self.devices[serial] = DeviceState(serial, parsed.model)
+            self._connecting.pop(serial, None)
             dev.ip = self._ips.get(serial)
             _LOGGER.info("New PetLibro device %s (%s)", _mask(serial), parsed.model)
             self._save()
@@ -187,6 +222,8 @@ class PetlibroHub:
         local_today = dt_util.now().date()
         if "linkId" not in msg:
             dev.ingest(parsed.channel, msg, now, local_today)  # also the ATTR_GET_SERVICE replies
+            if msg.get("cmd") == "WATER_CAP_EVENT":
+                self._on_water(serial, protocol.water_weights(msg), local_today)
             if parsed.channel == "service" or protocol.is_reply(msg.get("cmd")):
                 self._resolve(msg)
         wire = self._wire_plan(serial)
@@ -267,6 +304,202 @@ class PetlibroHub:
             raise ServiceValidationError("Only fountains have a filter")
         msg = protocol.filter_reset(FILTER_LIFE_DAYS)
         await self.async_set_attrs(serial, msg, {"filter_due_ms": msg["filterNextReplacementTimestamp"]})
+
+    # --- water: readings, calibration, consumption ---
+    def _on_water(self, serial: str, weights: list[float], today) -> None:
+        if not weights:
+            return
+        for fut in self._water_waiters.get(serial, []):
+            if not fut.done():
+                fut.set_result(weights)
+        tracker = self.consumption.setdefault(serial, callib.Consumption())
+        mono = time.monotonic()
+        if tracker.update(weights, today) or mono - self._consumption_saved >= CONSUMPTION_SAVE:
+            self._consumption_saved = mono
+            self._save()
+
+    def _fountain(self, serial: str) -> ModelInfo:
+        info = self.info(serial)
+        if info.kind != FOUNTAIN:
+            raise ServiceValidationError("Only fountains have a water level")
+        return info
+
+    def usable_cal(self, serial: str) -> dict[str, float] | None:
+        cal = self.calibration.get(serial)
+        return cal if callib.usable(cal) else None
+
+    async def async_capture_water(self, serial: str, which: str) -> dict[str, Any]:
+        """Record the fountain's current weight as the empty or the full reading.
+
+        Waits for a reading that arrives after the call (up to CAPTURE_TIMEOUT) and averages its samples.
+        """
+        self._fountain(serial)
+        if serial not in self._online:
+            raise HomeAssistantError(f"{_mask(serial)} is not connected")
+        fut = asyncio.get_running_loop().create_future()
+        waiters = self._water_waiters.setdefault(serial, [])
+        waiters.append(fut)
+        try:
+            weights = await asyncio.wait_for(fut, CAPTURE_TIMEOUT)
+        except (asyncio.TimeoutError, TimeoutError) as err:
+            raise HomeAssistantError(
+                f"No new water reading arrived within {CAPTURE_TIMEOUT} seconds. Check that the fountain is online.") from err
+        finally:
+            if fut in waiters:
+                waiters.remove(fut)
+            if not waiters:
+                self._water_waiters.pop(serial, None)
+        grams = sum(weights) / len(weights)
+        dropped = False
+        try:
+            if which == "empty":
+                cal, dropped = callib.set_empty(self.calibration.get(serial), grams, time.time())
+            else:
+                cal = callib.set_full(self.calibration.get(serial), grams, time.time())
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        self.calibration[serial] = cal
+        self._save()
+        self._signal(serial)
+        return {"grams": round(grams, 1), "dropped_full": dropped}
+
+    def set_calibration(self, serial: str, empty_g: float, full_g: float) -> None:
+        self._fountain(serial)
+        try:
+            self.calibration[serial] = callib.set_both(empty_g, full_g, time.time())
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        self._save()
+        self._signal(serial)
+
+    def reset_calibration(self, serial: str) -> None:
+        self._fountain(serial)
+        self.calibration.pop(serial, None)
+        self._save()
+        self._signal(serial)
+
+    async def async_zero_scale(self, serial: str) -> None:
+        self._fountain(serial)
+        await self.async_command(serial, protocol.weight_clear())
+
+    def water_info(self, serial: str) -> dict[str, Any]:
+        """Level, volume, use and threshold of a fountain (the entities and the app share this)."""
+        d = self.devices[serial].data
+        cal = self.usable_cal(serial)
+        wcfg = self.alerts.water_cfg()
+        check = alertlib.water_check(d, wcfg.get("threshold_g"), cal, wcfg.get("threshold_pct"))
+        weight = d.get("water_weight")
+        weight = weight if isinstance(weight, (int, float)) and not isinstance(weight, bool) else None
+        if check is not None:
+            limit, unit, source, low = check.limit, check.unit, check.source, check.low
+        else:
+            limit, source = alertlib.water_threshold(d, wcfg.get("threshold_g"))
+            unit, low = "g", None
+        today = dt_util.now().date()
+        tracker = self.consumption.get(serial)
+        avg = tracker.average_daily(today) if tracker else None
+        ml = callib.remaining_ml(weight, cal) if cal and weight is not None else None
+        return {
+            "calibrated": cal is not None, "level_pct": check.level if check else None, "remaining_ml": ml,
+            "used_today_ml": tracker.used_today(today) if tracker and weight is not None else None,
+            "avg_daily_ml": None if avg is None else round(avg),
+            "days_left": callib.days_left(ml, avg),
+            "low": low, "threshold": limit, "threshold_unit": unit, "threshold_source": source,
+        }
+
+    # --- devices: rename, remove, block, DNS check ---
+    def rename_device(self, serial: str, name: str) -> None:
+        """Set the device registry name the user sees ("" returns to the default name)."""
+        try:
+            clean = callib.clean_name(name)
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        registry = dr.async_get(self.hass)
+        if (device := registry.async_get_device(identifiers={(DOMAIN, serial)})) is None:
+            raise ServiceValidationError("This device is not in the device registry yet")
+        registry.async_update_device(device.id, name_by_user=clean or None)
+        self.signal_all()
+
+    def forget_device(self, serial: str) -> None:
+        """Disconnect a device and delete everything stored about it (not its registry entry, not the block list)."""
+        self.broker.disconnect(serial)
+        for fut in self._water_waiters.pop(serial, []):
+            if not fut.done():
+                fut.set_exception(HomeAssistantError("The device was removed"))
+        self._online.discard(serial)
+        for table in (self.devices, self.plans, self.feed_portions, self.calibration, self.consumption,
+                      self._plan_sig, self._plan_synced, self._plan_sent, self._plan_tries, self._last_poll,
+                      self._ips, self._connecting):
+            table.pop(serial, None)
+        self.alerts.forget_device(serial)
+        self._save()
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_REMOVED, serial)
+        async_dispatcher_send(self.hass, SIGNAL_ANY)
+
+    async def async_remove_device(self, serial: str, block: bool = False) -> None:
+        """Remove a device from Home Assistant; with ``block`` the broker also refuses its serial from now on."""
+        known = serial in self.devices
+        if block:
+            self.blocked[serial] = {
+                "model": self.devices[serial].model if known else None,
+                "name": self.device_name(serial)[:callib.NAME_MAX] if known else "", "ts": time.time()}
+        if known:
+            self.forget_device(serial)
+        else:
+            self.broker.disconnect(serial)
+            self._connecting.pop(serial, None)
+            self._save()
+            async_dispatcher_send(self.hass, SIGNAL_ANY)
+        registry = dr.async_get(self.hass)
+        if (device := registry.async_get_device(identifiers={(DOMAIN, serial)})) is not None:
+            registry.async_remove_device(device.id)  # takes the entities with it
+
+    def unblock_device(self, serial: str) -> None:
+        if self.blocked.pop(serial, None) is None:
+            raise ServiceValidationError("That device is not blocked")
+        self._blocked_seen.pop(serial, None)
+        self._save()
+        async_dispatcher_send(self.hass, SIGNAL_ANY)
+
+    async def _local_ips(self) -> list[str]:
+        """This host's private IPv4 addresses, the default adapter's first."""
+        ips: list[str] = []
+        try:
+            from homeassistant.components import network  # noqa: PLC0415 - optional at import time
+
+            adapters = sorted(await network.async_get_adapters(self.hass), key=lambda a: not a.get("default"))
+            ips = [ip["address"] for a in adapters for ip in a.get("ipv4", []) if isinstance(ip.get("address"), str)]
+            source = await network.async_get_source_ip(self.hass)
+            if isinstance(source, str):
+                ips.append(source)
+        except Exception:  # noqa: BLE001 - the check then reports that it cannot tell
+            _LOGGER.debug("Could not list this host's addresses", exc_info=True)
+        return [ip for ip in dict.fromkeys(ips) if is_lan_ipv4(ip)]
+
+    async def async_dns_check(self) -> dict[str, Any]:
+        """Does ``mqtt.us.petlibro.com`` resolve (from Home Assistant's resolver) to this host?"""
+        local = await self._local_ips()
+        try:
+            resolved, error = await asyncio.wait_for(self.hass.async_add_executor_job(resolve_ipv4, CLOUD_HOST), 8)
+        except (asyncio.TimeoutError, TimeoutError):
+            resolved, error = [], "the lookup timed out"
+        status = classify_dns(resolved, local)
+        return {"host": CLOUD_HOST, "status": status, "resolved": resolved, "local_ips": local, "error": error,
+                "port": self.broker.port}
+
+    def devices_admin(self) -> dict[str, Any]:
+        """What only the Devices tab needs: refused serials, devices that are connecting, the port."""
+        return {
+            "blocked": [{
+                "id": serial, "serial_masked": mask_serial(serial), "model": b.get("model"), "name": b.get("name", ""),
+                "ts": int(b["ts"] * 1000) if b.get("ts") else None,
+                "attempt_ts": int(seen[1] * 1000) if (seen := self._blocked_seen.get(serial)) else None,
+            } for serial, b in self.blocked.items()],
+            "connecting": [{
+                "serial_masked": mask_serial(serial), "ip": c["ip"], "ts": int(c["ts"] * 1000), "model": c["model"],
+            } for serial, c in self._connecting.items()],
+            "port": self.broker.port, "cloud_host": CLOUD_HOST,
+        }
 
     # --- plans ---
     def _wire_plan(self, serial: str) -> list[dict[str, Any]] | None:
@@ -353,6 +586,7 @@ class PetlibroHub:
                 "serial": serial, "name": self.device_name(serial), "kind": info.kind, "online": online,
                 "offline_since": None if online else (dev.last_seen_ts or self.started_ts),
                 "battery": info.battery, "data": dev.data, "feeds_today": self._feeds_today(dev),
+                "calibration": self.usable_cal(serial),
                 "next_feed": (int(nxt[0].timestamp() * 1000), nxt[1]) if nxt else None,
             })
         return out
@@ -374,6 +608,9 @@ class PetlibroHub:
             "light": d.get("light"), "battery": d.get("battery") if info.battery else None,
             "has_battery": info.battery, "rssi": d.get("rssi"),
         }
+        if admin:  # the Devices tab
+            out.update(serial_masked=mask_serial(serial), ip=dev.ip, firmware=d.get("software_version"),
+                       hardware=d.get("hardware_version"))
         if info.kind == FEEDER:
             nxt = self.next_feed(serial)
             out.update(
@@ -384,13 +621,16 @@ class PetlibroHub:
                 next_feed=({"ts": int(nxt[0].timestamp() * 1000), "portions": nxt[1]} if nxt else None),
                 feed_portions=self.feed_portions.get(serial, 1))
         elif info.kind == FOUNTAIN:
-            override = self.alerts.water_override()
-            limit, source = alertlib.water_threshold(d, override)
+            water = self.water_info(serial)
             days = alertlib.filter_days_left(d, now)
             out.update(
                 pump_on=d.get("pump_on"), charging=alertlib.charging(d), plugged_in=alertlib.plugged_in(d),
                 battery_state=d.get("battery_state"), water_weight=d.get("water_weight"),
-                water_low=alertlib.water_low(d, override), water_threshold=limit, water_threshold_source=source,
+                water_low=water["low"], water_threshold=water["threshold"], water_threshold_unit=water["threshold_unit"],
+                water_threshold_source=water["threshold_source"], calibrated=water["calibrated"],
+                calibration=self.calibration.get(serial), water_level_pct=water["level_pct"],
+                water_ml=water["remaining_ml"], water_used_ml=water["used_today_ml"],
+                water_avg_daily_ml=water["avg_daily_ml"], water_days_left=water["days_left"],
                 device_low_water=d.get("low_water"), filter_due_ms=d.get("filter_due_ms"),
                 filter_days_left=None if days is None else round(days, 1), filter_overdue=None if days is None else days <= 0,
                 radar_seen_ms=d.get("radar_seen_ms"), radar_now=d.get("radar_now"))
@@ -418,9 +658,11 @@ class PetlibroHub:
         return {
             "port": self.broker.port,
             "connected": self.broker.clients,
+            "blocked": len(self.blocked),
             "devices": {
                 s: {"model": d.model, "ip": d.ip, "online": s in self._online, "data": dict(d.data),
-                    "feeds_today": d.feeds_today, "plan": self.plans.get(s)}
+                    "feeds_today": d.feeds_today, "plan": self.plans.get(s), "calibration": self.calibration.get(s),
+                    "consumption": self.consumption[s].to_dict() if s in self.consumption else None}
                 for s, d in self.devices.items()
             },
         }

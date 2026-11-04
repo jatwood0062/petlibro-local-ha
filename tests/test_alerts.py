@@ -330,3 +330,77 @@ def test_active_alerts_listing():
     run.go([feeder(food_present=False)])
     out = alerts.active_alerts(run.state, {"AF1": "Granary"})
     assert [(a["type"], a["device"], a["serial"]) for a in out] == [("food_low", "Granary", "AF1")]
+
+
+# --- water low with a calibration (percent) ---
+CAL = {"empty_g": 400.0, "full_g": 2400.0}  # 2000 g span: 20 g per percent
+
+
+def calibrated(**data):
+    return {**fountain(**data), "calibration": CAL}
+
+
+def test_water_check_calibrated_uses_percent_and_ignores_gram_settings():
+    check = alerts.water_check({"water_weight": 1000, "low_water": 1649}, 1500, CAL, 25)
+    assert (check.unit, check.limit, check.level, check.low) == ("%", 25.0, 30.0, False)  # grams rules would say low
+    assert alerts.water_check({"water_weight": 800}, None, CAL, 25).low is True  # 20 %
+    assert alerts.water_check({"water_weight": 800}, None, CAL, None).limit == 25.0  # default percent
+    assert alerts.water_check({"low_water": 1}, None, CAL, 25) is None
+
+
+def test_water_check_without_calibration_is_the_gram_rule():
+    check = alerts.water_check({"water_weight": 1000, "low_water": 1649}, None, None, 25)
+    assert (check.unit, check.limit, check.source, check.low, check.level) == ("g", 1649.0, "device", True, None)
+    assert alerts.water_check({"water_weight": 1000}, None, {"empty_g": 400.0}, 25).unit == "g"  # half a calibration
+
+
+def test_water_low_signature_stays_compatible():
+    assert alerts.water_low({"water_weight": 800}, None, CAL, 25) is True
+    assert alerts.water_low({"water_weight": 1300}, None, CAL, 25) is False  # 45 %
+    assert alerts.water_low({"water_weight": 1300}, 1500) is True  # old call: grams only
+
+
+def test_calibrated_water_alert_with_percent_hysteresis():
+    run = Run(settings(water_low={"threshold_pct": 25}))
+    assert run.go([calibrated(water_weight=1400)]) == []  # 50 %
+    first = run.go([calibrated(water_weight=800)], 1)  # 20 %
+    assert kinds(first)[0][:2] == ("water_low", "active")
+    assert "20 %" in first[0].message and "400 mL" in first[0].message and "below 25 %" in first[0].message
+    assert run.go([calibrated(water_weight=950)], 5) == []  # 27.5 %: above 25 but inside the 3-point band
+    assert run.state["alerts"]["water_low:WF1"]["clear_since"] is None
+    run.go([calibrated(water_weight=1100)], 1)  # 35 %
+    out = run.go([calibrated(water_weight=1100)], 3)
+    assert kinds(out)[0][:2] == ("water_low", "resolved") and "35 %" in out[0].message
+
+
+def test_uncalibrated_fountain_keeps_the_gram_alert_even_with_a_percent_setting():
+    run = Run(settings(water_low={"threshold_g": 1000, "threshold_pct": 90}))
+    assert run.go([fountain(water_weight=1500)]) == []
+    assert kinds(run.go([fountain(water_weight=900)], 1))[0][:2] == ("water_low", "active")
+
+
+def test_summary_shows_percent_for_a_calibrated_fountain():
+    cfg = settings(daily_summary={"enabled": True, "time": "20:00"})
+    out = alerts.summary_text([calibrated(water_weight=1400, battery=80)], ts(T0), T0, cfg)
+    assert "water 50 % (1000 mL)" in out
+
+
+# --- settings migration ---
+def test_settings_saved_by_0_2_get_the_percent_default():
+    old = {"targets": ["service:mobile_app_x"], "persistent": True,
+           "alerts": {"water_low": {"enabled": True, "threshold_g": 1200, "remind_hours": 6}}}  # as 0.2.0 stored it
+    out = alerts.normalize_settings(old)
+    wl = out["alerts"]["water_low"]
+    assert wl["threshold_g"] == 1200.0 and wl["remind_hours"] == 6 and wl["threshold_pct"] == 25
+    assert alerts.normalize_settings(None)["alerts"]["water_low"]["threshold_pct"] == 25
+    assert alerts.normalize_settings(copy.deepcopy(out)) == out
+
+
+@pytest.mark.parametrize("bad", [0, 100, 12.5, True, "25", None])
+def test_percent_threshold_must_be_a_whole_percent(bad):
+    with pytest.raises(ValueError):
+        alerts.normalize_settings({"alerts": {"water_low": {"threshold_pct": bad}}})
+
+
+def test_percent_threshold_accepts_a_whole_percent():
+    assert alerts.normalize_settings({"alerts": {"water_low": {"threshold_pct": 40.0}}})["alerts"]["water_low"]["threshold_pct"] == 40

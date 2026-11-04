@@ -25,7 +25,7 @@ class FeedPortions(PetlibroEntity, RestoreNumber):
 
     @property
     def native_value(self) -> float:
-        return self.hub.feed_portions[self.serial]
+        return self.hub.feed_portions.get(self.serial, 1)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

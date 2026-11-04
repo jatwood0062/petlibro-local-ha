@@ -6,7 +6,7 @@ other party, through the callbacks and ``publish``; clients never see each other
 
 Security: peers must be private / link-local IPv4; at most 16 connections; packets up to 64 KiB;
 CONNECT within 10 s; idle clients are dropped at 1.5x their keepalive; message rate is limited;
-client ids must look like PetLibro serials; a client can only publish to and subscribe under its
+client ids must look like PetLibro serials; a blocked serial gets CONNACK 5 (not authorized); a client can only publish to and subscribe under its
 own ``dl/<model>/<serial>/`` prefix (anything else is dropped). Credentials are not checked: the
 devices use static ones that mean nothing locally. Parsing is strict and never raises out of a
 connection task. Only QoS 0 and 1 are supported (QoS 2 closes the connection); nothing is retained.
@@ -45,7 +45,7 @@ FORWARD_IDLE = 600.0
 CONNECT, CONNACK, PUBLISH, PUBACK = 1, 2, 3, 4
 SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK = 8, 9, 10, 11
 PINGREQ, PINGRESP, DISCONNECT = 12, 13, 14
-RC_OK, RC_VERSION, RC_ID = 0, 1, 2
+RC_OK, RC_VERSION, RC_ID, RC_NOT_AUTHORIZED = 0, 1, 2, 5
 
 
 class MqttError(Exception):
@@ -205,12 +205,15 @@ class Broker:
         connect_timeout: float = CONNECT_TIMEOUT,
         default_idle: float = DEFAULT_IDLE,
         tls_forward: tuple[str, int] | None = None,
+        blocked: Callable[[str], bool] | None = None,
+        on_blocked: Callable[[str, str], None] | None = None,
     ) -> None:
         self._on_publish, self._on_connect, self._on_disconnect = on_publish, on_connect, on_disconnect
         self.host, self.port = host, port
         self._peer_ok, self._client_ok = peer_ok, client_ok
         self._connect_timeout, self._default_idle = connect_timeout, default_idle
         self._tls_forward = tls_forward
+        self._blocked, self._on_blocked = blocked, on_blocked
         self._server: asyncio.AbstractServer | None = None
         self._conns: dict[str, _Conn] = {}
         self._active = 0
@@ -232,6 +235,14 @@ class Broker:
                 await asyncio.wait_for(server.wait_closed(), 5)
             except (asyncio.TimeoutError, TimeoutError):
                 _LOGGER.debug("Timed out waiting for the broker to close")
+
+    def disconnect(self, client_id: str) -> bool:
+        """Drop a client's connection without reporting a disconnect (the caller already knows)."""
+        conn = self._conns.pop(client_id, None)
+        if conn is None:
+            return False
+        conn.close()
+        return True
 
     def is_connected(self, client_id: str) -> bool:
         return client_id in self._conns
@@ -329,6 +340,9 @@ class Broker:
             hello = parse_connect(body)
             if not hello.client_id or not self._client_ok(hello.client_id):
                 raise ConnectRefused(RC_ID)
+            if self._blocked is not None and self._blocked(hello.client_id):
+                self._notify(self._on_blocked, hello.client_id, conn.ip)
+                raise ConnectRefused(RC_NOT_AUTHORIZED)
         except ConnectRefused as err:
             await conn.send(bytes([CONNACK << 4, 2, 0, err.rc]))
             raise

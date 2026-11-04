@@ -31,3 +31,6 @@ ALERT_STORE_KEY = f"{DOMAIN}.alerts"
 PANEL_URL_PATH = "petlibro-local"
 PANEL_ELEMENT = "petlibro-local-panel"
 FRONTEND_URL = "/petlibro_lan_frontend"
+SIGNAL_DEVICE_REMOVED = f"{DOMAIN}_device_removed"  # a device was removed: platforms forget it so it can be added again
+CAPTURE_TIMEOUT = 60  # seconds a calibration capture waits for a fresh water reading
+CONSUMPTION_SAVE = 300  # seconds between saves of the water-use tracker
